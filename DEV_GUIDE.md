@@ -264,6 +264,166 @@ bear -- make
 
 ---
 
+## 언어 선택: C vs Rust vs Python
+
+### 한눈에 비교
+
+| 항목 | C | Rust | Python (PL/Python) |
+|------|---|------|--------------------|
+| 성능 | 최고 | C와 동급 | 낮음 (인터프리터) |
+| 안전성 | 낮음 (직접 메모리 관리) | 높음 (컴파일 타임 보장) | 높음 |
+| 개발 속도 | 느림 | 중간 | 빠름 |
+| 빌드 복잡도 | 중간 (PGXS) | 낮음 (cargo-pgrx) | 없음 (설치 즉시 사용) |
+| PostgreSQL 내부 접근 | 완전 | 완전 | 제한적 |
+| 배포 | .so 파일 | .so 파일 | SQL 파일만 |
+| 학습 난이도 | 높음 | 중간-높음 | 낮음 |
+| 생태계 | PostgreSQL 표준 | 성장 중 | Python 전체 활용 가능 |
+
+---
+
+### C
+
+PostgreSQL 자체가 C로 작성되어 있어, 내부 API를 가장 직접적으로 사용할 수 있습니다.
+
+**장점:**
+- PostgreSQL 내부 구조에 완전 접근 (Planner hook, Executor hook 등)
+- 최고 성능
+- 모든 PostgreSQL 버전 지원
+
+**단점:**
+- 메모리 오류(segfault, buffer overflow) 위험
+- `palloc` / `pfree` 등 PostgreSQL 메모리 컨텍스트를 직접 관리해야 함
+- 디버깅 어려움
+
+**적합한 경우:**
+- Custom index access method
+- Background worker
+- Planner/Executor hook
+- 기여하거나 fork할 PostgreSQL 핵심 기능
+
+```c
+#include "postgres.h"
+#include "fmgr.h"
+#include "utils/builtins.h"
+
+PG_MODULE_MAGIC;
+
+PG_FUNCTION_INFO_V1(add_two);
+
+Datum
+add_two(PG_FUNCTION_ARGS)
+{
+    int32 a = PG_GETARG_INT32(0);
+    int32 b = PG_GETARG_INT32(1);
+    PG_RETURN_INT32(a + b);
+}
+```
+
+---
+
+### Rust (pgrx)
+
+현대적인 extension 개발의 표준으로 자리잡고 있습니다.
+
+**장점:**
+- 컴파일 타임 메모리 안전성 (C의 주요 위험 제거)
+- `cargo-pgrx`로 개발 경험 우수 (`cargo pgrx run` 한 줄로 실행)
+- Rust 생태계(crates.io) 활용 가능
+- 타입 안전한 PostgreSQL API 바인딩
+
+**단점:**
+- Rust 언어 자체의 학습 곡선
+- pgrx 버전과 PostgreSQL 버전 호환성 관리 필요
+- 빌드 시간이 C보다 김
+
+**적합한 경우:**
+- 새로운 extension 프로젝트 시작 시
+- 복잡한 비즈니스 로직이 포함된 함수
+- 외부 Rust 라이브러리를 PostgreSQL 내부에서 사용할 때
+
+```rust
+use pgrx::prelude::*;
+
+pg_module_magic!();
+
+#[pg_extern]
+fn add_two(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use pgrx::prelude::*;
+
+    #[pg_test]
+    fn test_add_two() {
+        assert_eq!(6, crate::add_two(2, 4));
+    }
+}
+```
+
+---
+
+### Python (PL/Python3u)
+
+PostgreSQL에 내장된 절차적 언어(Procedural Language)로, 별도 빌드 없이 사용합니다.
+
+**장점:**
+- 빌드 없음 - SQL 파일만으로 배포
+- Python 라이브러리(numpy, pandas, scikit-learn 등) 직접 사용 가능
+- 빠른 프로토타이핑
+- 데이터 과학/ML 워크로드에 적합
+
+**단점:**
+- 성능이 C/Rust 대비 크게 낮음
+- `u` (untrusted) 접미사 - 슈퍼유저 권한 필요
+- PostgreSQL 내부 API 접근 불가
+- Python 환경(버전, 패키지) 서버에 사전 설치 필요
+
+**적합한 경우:**
+- 데이터 변환, 집계, ML 추론 함수
+- 빠른 프로토타이핑 후 C/Rust로 재작성 예정인 경우
+- Python 라이브러리가 핵심인 기능 (예: 텍스트 분석, 통계)
+
+```sql
+CREATE EXTENSION plpython3u;
+
+CREATE FUNCTION add_two(a integer, b integer)
+RETURNS integer
+AS $$
+    return a + b
+$$ LANGUAGE plpython3u;
+
+-- numpy 활용 예시
+CREATE FUNCTION array_mean(arr float8[])
+RETURNS float8
+AS $$
+    import numpy as np
+    return float(np.mean(arr))
+$$ LANGUAGE plpython3u;
+```
+
+---
+
+### 언어 선택 기준
+
+```
+성능이 최우선이고 PostgreSQL 내부를 다뤄야 한다
+    → C
+
+새 프로젝트이고 안전성 + 생산성을 원한다
+    → Rust (pgrx)
+
+ML/데이터 처리이거나 빠른 프로토타이핑이 목적이다
+    → Python (PL/Python3u)
+
+Python으로 검증 후 프로덕션 성능이 필요해졌다
+    → Python → Rust로 재작성
+```
+
+---
+
 ## 참고
 
 - [PostgreSQL Extension 공식 문서](https://www.postgresql.org/docs/current/extend-extensions.html)
