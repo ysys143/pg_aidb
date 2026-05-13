@@ -179,6 +179,39 @@ Background Worker를 extension에 둘 이유가 없다.
 
 ---
 
+## ADR-003: RAG 파이프라인 책임 분리 원칙
+
+### 결론
+
+**RAG 파이프라인은 최대한 외부 플랫폼 책임으로 만든다. Extension은 단순 호출만 한다.**
+
+### 근거
+
+SQL 인터페이스(`ai.retrieve()`, `ai.predict()` 등)를 호출하는 주체는 사람이 아니라 애플리케이션이다. 애플리케이션 입장에서 SQL 호출과 SDK 호출의 차이는 없다. SQL 인터페이스가 편리하다는 주장은 분석가가 직접 쿼리하는 케이스에만 유효하다.
+
+RAG/LLM 워크로드는 DB, App, GPU, Storage가 각자의 전문성으로 독립적으로 스케일링되고 장애 도메인이 분리되어야 한다. DB 안으로 GPU 워크로드를 끌고 오면 스케일링 단위가 충돌하고 장애 도메인이 합쳐진다.
+
+PostgresML은 in-process ML로 $4.7M을 받았으나 LLM 시대에 설계가 맞지 않아 2025년 서비스 종료했다. Oracle 26ai, EDB AIDB의 in-DB AI는 기술적 필요보다 벤더 락인에 가깝다.
+
+### extension이 하는 것
+
+- model_registry 조회
+- 플랫폼 endpoint 호출 (pg_net)
+- 결과 반환
+
+### 플랫폼(외부 서비스)이 하는 것
+
+- chunking
+- embedding
+- vector indexing
+- retrieval
+- reranking
+- LLM 호출
+- document ingestion
+- pipeline orchestration
+
+---
+
 ## ADR-002: pg_aidb Extension vs Pure UDF
 
 ### 쟁점
