@@ -150,12 +150,32 @@ PostgreSQL WAL
 
 ---
 
+### EDB AIDB는 왜 Background Worker를 썼는가
+
+EDB AIDB는 두 가지 배포 모드를 지원한다.
+
+- **Hybrid Manager 있음**: AI Factory 서비스들이 K8s에서 동작. extension은 인터페이스만.
+- **Hybrid Manager 없음 (standalone)**: `CREATE EXTENSION aidb` 하나로 모든 게 동작해야 함. Background Worker가 auto-processing을 담당.
+
+Background Worker를 extension에 넣은 이유는 **standalone 설치를 지원하기 위해서**다.
+Hybrid Manager가 있으면 그 Worker는 사실상 놀게 된다.
+
+우리는 standalone을 지원하지 않는다. Docker Compose가 최소 요구사항이므로
+Background Worker를 extension에 둘 이유가 없다.
+
+### 결론
+
+**옵션 C (Trigger + NOTIFY + Outbox Pattern) 채택.**
+
+- 배포 최소 요구사항: **Docker Compose** (standalone 미지원)
+- Background Worker를 extension에 두지 않는다
+- auto-processing 포함 모든 비동기 작업은 외부 서비스(pipeline-worker) 책임
+- extension 역할: SQL 함수 + Trigger + NOTIFY + Outbox 테이블 설치까지
+
 ### 미결 사항
 
-- [ ] 배포 환경 최소 요구사항 확정 (extension 단독 vs Docker/K8s 필수)
-- [ ] 이벤트 유실 허용 여부
+- [ ] 이벤트 유실 허용 여부 (Outbox로 충분한지, CDC가 필요한지)
 - [ ] Outbox 테이블을 extension이 관리할 것인지, 사용자 스키마에 둘 것인지
-- [ ] logical replication 권한 문제 처리 방안
 
 ---
 
