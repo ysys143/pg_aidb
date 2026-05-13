@@ -306,11 +306,46 @@ extension  →  ai.chunks에 write
 
 ---
 
-### 미결 사항
+### 결론: 플랫폼 소유 상태 테이블 + Extension Read-Only Projection
 
-- [ ] SQL 가시성이 실제로 필요한 유스케이스가 무엇인가 (분석가 쿼리? 디버깅? 운영 모니터링?)
-- [ ] 가시성이 필요한 아티팩트 범위 (전체 청크/임베딩? 아니면 status만?)
-- [ ] 결합 비용 vs 가시성 가치 중 어느 쪽이 큰가
+플랫폼이 어차피 PostgreSQL을 주 저장소로 쓰는 구조이므로, 메인 상태 테이블은 플랫폼 소유로 두고 extension이 이를 바라보는 방식으로 딜레마를 해소한다.
+
+**스키마 3층 구조:**
+
+```
+platform.*           ← 플랫폼 내부 구현 (extension이 직접 의존하지 않음)
+platform_ai.*_v1     ← 플랫폼이 extension에 제공하는 versioned 계약면
+ai.*                 ← 사용자에게 노출되는 제품면 (extension 소유)
+```
+
+플랫폼은 내부 테이블 구조를 자유롭게 바꾸되 `platform_ai.*_v1` 호환성 view만 유지한다.
+extension은 원본 테이블이 아니라 이 계약면만 바라본다.
+
+```sql
+-- 플랫폼이 제공하는 계약면
+CREATE VIEW platform_ai.pipeline_runs_v1 AS
+SELECT id AS run_id, name AS pipeline_name, state AS status,
+       progress, created_at, updated_at, finished_at AS completed_at,
+       error_code, error_message
+FROM platform.pipeline_runs;
+
+-- extension이 사용자에게 노출하는 제품면
+CREATE VIEW ai.pipeline_runs AS
+SELECT * FROM platform_ai.pipeline_runs_v1;
+
+CREATE FUNCTION ai.pipeline_status(p_run_id uuid) ...
+    -- platform_ai.pipeline_runs_v1 조회
+```
+
+**별도 스트리밍 채널 불필요:**
+- 상태 조회 → 테이블 직접 read (polling)
+- 작업 트리거 → NOTIFY를 hint로만 사용 (없어도 polling으로 복구)
+- 중간 상태 실시간성이 초 단위면 streaming 없이 충분
+
+**소유권 정리:**
+- 상태 전이 책임 → 플랫폼
+- SQL 인터페이스 책임 → extension
+- extension은 상태를 저장하지 않고 투영(projection)만 한다
 
 ---
 
