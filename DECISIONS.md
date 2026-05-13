@@ -349,6 +349,96 @@ CREATE FUNCTION ai.pipeline_status(p_run_id uuid) ...
 
 ---
 
+## ADR-005: 공통 실행 모델 - Skill-Plan-Execute
+
+### 결론
+
+**Skill-Plan-Execute를 pg_aidb 플랫폼의 공통 실행 패턴으로 채택한다.**
+
+### 층위 정의
+
+세 층위는 역할이 명확히 다르다.
+
+```
+Skill   ← 문제 유형에 따른 상위 전략
+            - 어떤 접근 방식을 쓸지 정의
+            - 어떤 tool subset을 LLM에 노출할지 제한
+            - LLM에게 줄 제약과 가이드 제공
+            - tool list보다 메타적인 레이어
+
+Plan    ← 선택된 skill 안에서 구체적 실행 계획 수립
+            - 어떤 순서로, 어떤 리소스를, 어떻게 접근할지
+            - 이 단계를 캐싱하면 지터 완화 가능
+            - DSL을 쓴다면 Plan의 출력 포맷이 DSL이 됨
+
+Execute ← 해당 skill이 허용한 tool로만 실행
+            - 오류 시 Plan으로 피드백
+            - 결과 검증 및 반환
+```
+
+### 각 서비스에서의 적용
+
+**RAG:**
+```
+Skill   ← "semantic_search" / "hybrid_search" / "multi_hop_retrieval"
+            → 어떤 인덱스 접근, reranking 여부, 탐색 홉 수
+Plan    ← 어떤 청크를 어떤 순서로 검색할지
+Execute ← vector search + rerank + 결과 조합
+```
+
+**NL2SQL:**
+```
+Skill   ← "simple_lookup" / "analytical" / "exploratory"
+            → 허용 도구 subset, 접근 전략, 스키마 탐색 범위
+Plan    ← 관련 테이블, 조인 관계, 집계 방식
+Execute ← SQL 생성 + 실행 + 오류 시 재계획
+```
+
+**Inference:**
+```
+Skill   ← "classification" / "generation" / "embedding"
+Plan    ← 모델 선택, 전처리 전략
+Execute ← 실제 추론
+```
+
+### SQL 인터페이스
+
+```sql
+SELECT ai.execute(
+    skill => 'semantic_search',
+    input => '사용자 질문',
+    config => '{"top_k": 10}'::jsonb
+);
+
+SELECT ai.execute(
+    skill => 'nl2sql_analytical',
+    input => '지난달 매출 상위 10개 상품'
+);
+```
+
+### NL2SQL 전략 쟁점 (미결)
+
+NL2SQL의 Plan 단계 구현 전략이 확정되지 않았다.
+
+**옵션 A: Query DSL**
+- NL → DSL → SQL (결정론적 컴파일러)
+- 지터 구조적 차단, DSL 설계/컴파일러 구현 비용 발생
+- 복잡한 쿼리는 DSL 표현력에 제한
+
+**옵션 B: MCP Tool 방식 (ClickHouse 전략)**
+- LLM에게 `list_tables`, `run_query` 등 도구를 주고 에이전트로 탐색
+- 유연하고 구현 단순, 지터 높음
+- 멀티턴 스키마 탐색 가능
+
+**옵션 C: 혼합**
+- Skill이 문제 유형을 분류
+- 단순/반복 쿼리 → DSL (캐싱, 지터 차단)
+- 탐색적/복잡 쿼리 → MCP Tool 방식
+
+- [ ] 타겟 유스케이스 확정 후 전략 결정
+
+---
+
 ## ADR-002: pg_aidb Extension vs Pure UDF
 
 ### 쟁점
