@@ -26,32 +26,31 @@ pg_cuvs는 pg_aidb 없이도 독립적으로 동작한다.
 ┌─────────────────────▼───────────────────────────────────┐
 │                PostgreSQL + pg_aidb                      │
 │                                                         │
-│  ai.predict()       ai.nl2sql()      ai.ingest()        │
-│  ai.vector_search() ai.batch_predict()                  │
+│  ai.execute(skill, input)   ai.predict()                │
+│  ai.nl2sql()  ai.ingest()   ai.vector_search()          │
 │                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │              model_registry                      │   │
-│  │  ai.models / ai.endpoints / ai.model_versions    │   │
-│  └──────────────────┬──────────────────────────────┘   │
-│                     │ HTTP                              │
-└─────────────────────┼───────────────────────────────────┘
-                      │
-        ┌──────────┬──────────┬──────────┐
-        ▼          ▼          ▼          ▼
-┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-│inference │ │  nl2sql  │ │   rag    │ │ pipeline │
-│  :8001   │ │  :8003   │ │  :8002   │ │  worker  │
-│  Python  │ │  Python  │ │  Python  │ │  Python  │
-│  FastAPI │ │  FastAPI │ │  FastAPI │ │          │
-│  onnxrt  │ │  schema  │ │ embed /  │ │ chunking │
-│          │ │  inspect │ │ retrieve │ │ indexing │
-└──────────┘ └──────────┘ └──────────┘ └──────────┘
+│  ┌──────────────────┐  ┌──────────────────────────┐    │
+│  │  model_registry  │  │   platform state views   │    │
+│  │  ai.models       │  │   ai.pipeline_runs (view)│    │
+│  │  ai.endpoints    │  │   ai.pipeline_status()   │    │
+│  └────────┬─────────┘  └──────────────────────────┘    │
+│           │ HTTP (pg_net)                               │
+└───────────┼─────────────────────────────────────────────┘
+            │
+   ┌────────┴────────┬──────────────┬──────────────┐
+   ▼                 ▼              ▼              ▼
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐
+│inference │  │  nl2sql  │  │   rag    │  │  pipeline    │
+│  :8001   │  │  :8003   │  │  :8002   │  │  worker      │
+│          │  │          │  │          │  │              │
+│ ONNX     │  │ Skill-   │  │ Skill-   │  │ chunking     │
+│ runtime  │  │ Plan-    │  │ Plan-    │  │ indexing     │
+│          │  │ Execute  │  │ Execute  │  │ (async)      │
+└──────────┘  └──────────┘  └──────────┘  └──────────────┘
 
   벡터 검색 백엔드 (pg_aidb.vector_backend로 선택)
   ┌──────────────────────┬──────────────────────┐
   │ pgvector (기본값)     │ pg_cuvs (GPU 서버)   │
-  │ SET vector_backend=  │ SET vector_backend=  │
-  │ 'pgvector'           │ 'pg_cuvs'            │
   └──────────────────────┴──────────────────────┘
 ```
 
@@ -63,6 +62,30 @@ Extension은 얇게 유지한다. 카탈로그 관리와 요청 라우팅만 담
 - Extension crash = PostgreSQL crash. 불안정한 연산을 in-process에 두지 않는다.
 - 서비스별 독립 스케일링 (GPU 서버, CPU 서버 분리 배치 가능)
 - 모델/서비스 교체 시 DB 재시작 불필요
+- RAG 파이프라인은 최대한 외부 플랫폼 책임. extension은 호출과 투영만 한다.
+
+## 공통 실행 모델: Skill-Plan-Execute
+
+모든 AI 요청은 Skill-Plan-Execute 패턴으로 처리한다.
+
+```
+Skill   ← 문제 유형에 따른 상위 전략
+            - 어떤 접근 방식을 쓸지 정의
+            - LLM에 노출할 tool subset 제한
+            - tool list보다 메타적인 레이어
+
+Plan    ← 선택된 skill 안에서 구체적 실행 계획 수립
+            - 캐싱 가능 → 지터 완화
+
+Execute ← skill이 허용한 tool로만 실행
+            - 오류 시 Plan으로 피드백
+```
+
+```sql
+SELECT ai.execute(skill => 'semantic_search', input => '사용자 질문');
+SELECT ai.execute(skill => 'nl2sql_analytical', input => '지난달 매출 상위 10개');
+SELECT ai.execute(skill => 'hybrid_search', input => '...', config => '{"top_k":10}'::jsonb);
+```
 
 ## 언어
 
@@ -96,7 +119,7 @@ CREATE TABLE ai.models (
 CREATE TABLE ai.endpoints (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name        text UNIQUE NOT NULL,
-    service     text NOT NULL,        -- 'inference' | 'nl2sql' | 'document'
+    service     text NOT NULL,        -- 'inference' | 'nl2sql' | 'rag' | 'pipeline'
     base_url    text NOT NULL,
     api_key_env text,                 -- 환경변수 이름 (값 직접 저장 금지)
     health_url  text GENERATED ALWAYS AS (base_url || '/health') STORED,
@@ -114,6 +137,28 @@ CREATE TABLE ai.model_versions (
     UNIQUE (model_id, version)
 );
 ```
+
+## 플랫폼 상태 가시성
+
+플랫폼이 PostgreSQL을 주 저장소로 사용한다. 상태 테이블은 플랫폼 소유이며
+extension은 read-only projection만 제공한다.
+
+```
+platform.*           ← 플랫폼 내부 구현
+platform_ai.*_v1     ← 플랫폼이 extension에 제공하는 versioned 계약면
+ai.*                 ← 사용자에게 노출되는 제품면 (extension 소유)
+```
+
+```sql
+-- 파이프라인 상태 조회 (extension이 노출하는 view)
+SELECT * FROM ai.pipeline_runs WHERE status = 'running';
+SELECT * FROM ai.pipeline_status($run_id);
+
+-- 파이프라인 제어
+INSERT INTO ai.pipeline_signals VALUES ($run_id, 'pause');
+```
+
+상태 조회는 테이블 직접 read (polling). 작업 트리거는 NOTIFY를 hint로만 사용한다.
 
 ## 서비스 API 규약
 
@@ -138,50 +183,82 @@ POST /predict/batch
 
 ### nl2sql-service (:8003)
 
-모든 LLM은 OpenAI-compatible API로 추상화한다.
-model_registry의 base_url + api_key_env로 어떤 provider든 교체 가능.
+Skill-Plan-Execute 패턴으로 처리. 모든 LLM은 OpenAI-compatible API로 추상화.
 
 ```
-POST /nl2sql
-     <- { "query": str, "schema": str, "model_name": str, "dialect": "postgresql" }
-     -> { "sql": str, "explanation": str, "confidence": float }
+POST /execute
+     <- { "skill": str, "input": str, "model_name": str, "config": {} }
+     -> { "sql": str, "plan": {}, "explanation": str }
+
+GET  /skills  ->  등록된 skill 목록
 ```
 
-### document-service (:8002)
+nl2sql-service 내부 컴포넌트:
+- schema inspector (pg_catalog 조회)
+- schema RAG (관련 테이블 선별)
+- skill registry (skill별 전략 + tool subset 정의)
+- query cache (Plan 캐싱으로 지터 완화)
+- SQL validator (실행 가능 여부 검증)
+
+### rag-service (:8002)
+
+Skill-Plan-Execute 패턴으로 처리.
 
 ```
-POST /ingest
-     <- { "content": str, "pipeline": str, "metadata": {} }
-     -> { "doc_id": uuid, "chunks": int, "status": "queued" | "done" }
+POST /execute
+     <- { "skill": str, "input": str, "index": str, "config": {} }
+     -> { "results": [...], "plan": {}, "latency_ms": int }
 
-POST /ingest/url
-     <- { "url": str, "pipeline": str }
-     -> { "doc_id": uuid, "status": "queued" }
+GET  /skills  ->  등록된 skill 목록
+```
+
+rag-service 내부 컴포넌트:
+- embedding (model_registry에서 모델 선택)
+- retrieval (vector search)
+- reranking
+- skill registry (semantic_search / hybrid_search / multi_hop_retrieval 등)
+
+### pipeline-worker (async)
+
+플랫폼 상태 테이블을 polling하여 작업을 소비한다. HTTP API 없음.
+
+처리 흐름:
+```
+platform.pipeline_jobs polling (또는 NOTIFY hint)
+  → chunking
+  → embedding 호출 (rag-service)
+  → vector index 갱신
+  → platform.pipeline_runs 상태 업데이트
 ```
 
 ## PostgreSQL 함수 인터페이스
 
 ```sql
+-- Skill-Plan-Execute 공통 인터페이스
+SELECT ai.execute(skill => 'semantic_search', input => '사용자 질문');
+SELECT ai.execute(skill => 'nl2sql_analytical', input => '지난달 매출 상위 10개');
+
 -- 단일 추론
 SELECT ai.predict('model-name', '{"input": "..."}'::jsonb);
+SELECT ai.batch_predict('model-name', ARRAY['{"text":"..."}']::jsonb[]);
 
--- 배치 추론
-SELECT ai.batch_predict('model-name', ARRAY['{"text":"..."}', ...]::jsonb[]);
-
--- NL2SQL (model_name 생략 시 default 모델 사용)
+-- NL2SQL
 SELECT ai.nl2sql('최근 7일간 가장 많이 팔린 상품 10개');
-SELECT ai.nl2sql('...', model_name => 'gpt-4o');
+SELECT ai.nl2sql('...', skill => 'nl2sql_analytical', model_name => 'gpt-4o');
 
 -- 문서 ingestion
 SELECT ai.ingest(content, 'default-pipeline') FROM documents;
 SELECT ai.ingest_url('https://...', 'web-pipeline');
 
--- 벡터 검색 (backend는 GUC로 선택)
+-- 벡터 검색
 SELECT * FROM ai.vector_search(
     query_vector => embedding,
     index_name   => 'product-index',
     top_k        => 10
 );
+
+-- 파이프라인 상태
+SELECT * FROM ai.pipeline_runs WHERE status = 'running';
 
 -- endpoint 등록 및 검증
 SELECT ai.register_endpoint('inference-prod', 'inference', 'http://inference:8001');
@@ -198,27 +275,23 @@ SET pg_aidb.vector_backend = 'pgvector';
 SET pg_aidb.vector_backend = 'pg_cuvs';
 ```
 
-pg_aidb는 GUC 값을 읽어 라우팅만 한다.
-pg_cuvs가 설치되지 않은 상태에서 `pg_cuvs`로 설정하면 에러를 반환한다.
-
 ## 배포
 
 ### 로컬 / 스테이징 - Docker Compose
 
 ```
 pg_aidb/deploy/
-├── docker-compose.yml        # 전체 스택 (postgres + 3개 서비스)
-└── docker-compose.dev.yml    # 소스 마운트 + hot reload override
+├── docker-compose.yml        # 전체 스택
+└── docker-compose.dev.yml    # 소스 마운트 + hot reload
 ```
-
-서비스 포트:
 
 | 서비스 | 포트 |
 |--------|------|
 | PostgreSQL | 5432 |
 | inference | 8001 |
-| document | 8002 |
+| rag | 8002 |
 | nl2sql | 8003 |
+| pipeline-worker | - (HTTP 없음) |
 
 ### 프로덕션 - Helm (Kubernetes)
 
@@ -229,18 +302,21 @@ pg_aidb/deploy/helm/
 ├── values.prod.yaml
 └── templates/
     ├── inference/
-    ├── document/
-    └── nl2sql/
+    ├── rag/
+    ├── nl2sql/
+    └── pipeline-worker/
 ```
 
 ## 구현 순서
 
 1. `model_registry` SQL 스키마 + CRUD 함수
 2. `inference-service` + ONNX 런타임
-3. `nl2sql-service` + schema inspector + OpenAI-compatible 클라이언트
-4. `document-service` + chunking + embedding pipeline
-5. Docker Compose 전체 스택
-6. Helm Chart
+3. `rag-service` + Skill-Plan-Execute + embedding/retrieval
+4. `nl2sql-service` + schema inspector + skill registry + query cache
+5. `pipeline-worker` + chunking + indexing
+6. 플랫폼 상태 테이블 + extension projection view
+7. Docker Compose 전체 스택
+8. Helm Chart
 
 ---
 
@@ -306,65 +382,33 @@ pg_cuvs/
 ## PostgreSQL 함수 인터페이스
 
 ```sql
--- 인덱스 생성
-SELECT cuvs.create_index(
-    index_name => 'product-index',
-    dimension  => 1536,
-    metric     => 'cosine'    -- 'cosine' | 'l2' | 'ip'
-);
-
--- 벡터 upsert
-SELECT cuvs.upsert(
-    index_name => 'product-index',
-    ids        => ARRAY[1, 2, 3],
-    vectors    => ARRAY[...]::vector[]
-);
-
--- 검색
-SELECT * FROM cuvs.search(
-    index_name   => 'product-index',
-    query_vector => '[0.1, 0.2, ...]'::vector,
-    top_k        => 10
-);
-
--- 인덱스 삭제
+SELECT cuvs.create_index(index_name => 'product-index', dimension => 1536, metric => 'cosine');
+SELECT cuvs.upsert(index_name => 'product-index', ids => ARRAY[1,2,3], vectors => ARRAY[...]::vector[]);
+SELECT * FROM cuvs.search(index_name => 'product-index', query_vector => '[...]'::vector, top_k => 10);
 SELECT cuvs.drop_index('product-index');
 ```
 
 ## 빌드
 
 ```makefile
-# Makefile
 MODULES    = pg_cuvs
 EXTENSION  = pg_cuvs
 DATA       = sql/pg_cuvs--1.0.sql
-
 CXX        = g++
 NVCC       = nvcc
 CUDA_FLAGS = -arch=sm_80 -O3
-
 PG_CONFIG  = pg_config
 PGXS      := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 ```
 
-```bash
-make
-sudo make install
-psql -c "CREATE EXTENSION pg_cuvs;"
-```
-
 ## 배포
 
 pg_cuvs는 `.so` 파일 단독 배포. Docker Compose / Helm 불필요.
-GPU 노드에만 설치하고 pg_aidb의 `vector_backend = 'pg_cuvs'`로 연결한다.
 
 ```
-GPU 서버    → pg_aidb + pg_cuvs 설치
-              SET pg_aidb.vector_backend = 'pg_cuvs';
-
-일반 서버  → pg_aidb만 설치
-              SET pg_aidb.vector_backend = 'pgvector';
+GPU 서버    → pg_aidb + pg_cuvs 설치 / SET pg_aidb.vector_backend = 'pg_cuvs'
+일반 서버  → pg_aidb만 설치       / SET pg_aidb.vector_backend = 'pgvector'
 ```
 
 ## 구현 순서
