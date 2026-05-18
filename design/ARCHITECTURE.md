@@ -231,6 +231,30 @@ platform.pipeline_jobs polling (또는 NOTIFY hint)
   → platform.pipeline_runs 상태 업데이트
 ```
 
+## API 모드
+
+pg_aidb는 두 가지 실행 모드를 모두 제공한다. 자세한 결정 배경은 ADR-006 참조.
+
+**동기 모드** — 개발/분석/저동시성. 커넥션 블로킹 수용.
+
+```sql
+SELECT ai.search(query => '질문', pipeline => 'docs');
+SELECT ai.generate(query => '질문', pipeline => 'docs');
+SELECT ai.embed('텍스트', 'openai');
+```
+
+**비동기 모드** — 고동시성 프로덕션. 커넥션 즉시 반환.
+
+```sql
+SELECT ai.search_async('질문', 'docs')    → request_id
+SELECT ai.generate_async('질문', 'docs')  → request_id
+
+-- 결과 수신: NOTIFY 또는 폴링 (클라이언트가 선택)
+SELECT * FROM ai.results WHERE id = $1 AND status = 'done';
+```
+
+---
+
 ## PostgreSQL 함수 인터페이스
 
 ```sql

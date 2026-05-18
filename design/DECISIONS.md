@@ -439,6 +439,101 @@ NL2SQL의 Plan 단계 구현 전략이 확정되지 않았다.
 
 ---
 
+## ADR-006: Query-Time 블로킹과 이중 모드 API
+
+### 쟁점
+
+쿼리 타임에 임베딩/LLM/리랭킹 API를 호출할 때 PostgreSQL 커넥션 블로킹을 어떻게 처리할 것인가.
+
+### 배경
+
+PostgreSQL은 process-per-connection 모델이다. 하나의 백엔드 프로세스가 HTTP 응답을
+기다리는 동안 해당 커넥션은 완전히 블록된다. AI 연산(임베딩 수백ms, LLM 수초~수십초)은
+이 블로킹 시간이 길어 고동시성 환경에서 커넥션 풀 고갈로 이어진다.
+
+**pg_net은 쿼리 타임 동기 결과에 해결책이 아니다.**
+
+pg_net은 HTTP 요청을 BGW에 위임하고 즉시 request_id를 반환한다. 그러나 SQL 쿼리가
+동기 결과를 반환해야 한다면, 결과가 올 때까지 커넥션을 붙들고 기다리거나 폴링해야 한다.
+커넥션 점유 문제는 구조적으로 해결되지 않는다.
+
+**pg_net이 유효한 용도:**
+- 파이프라인 빌드(인제스천): fire-and-forget, 결과를 나중에 테이블에서 읽음
+- 비동기 API: 즉시 request_id를 반환하고 결과를 나중에 수신
+
+### Oracle 26ai / EDB aidb의 접근
+
+- Oracle: in-process ONNX Runtime으로 쿼리 타임 임베딩 HTTP 제거. 그러나 LLM 호출은
+  여전히 블로킹. 소형 ONNX 모델만 가능하며 외부 API 의존 구조에는 적용 불가.
+- EDB aidb: 블로킹을 수용한다. 인제스천은 BGW 비동기, 쿼리 타임은 동기 HTTP.
+
+두 제품 모두 고동시성 실시간 AI 서빙을 타겟하지 않는다. 분석/개발 워크로드가 주 타겟.
+
+### 결론: 이중 모드 API
+
+**동기 모드** — 개발, 분석, 저동시성 운영용
+
+```sql
+SELECT ai.search(query => '질문', pipeline => 'docs', top_k => 10);
+SELECT ai.generate(query => '질문', pipeline => 'docs');
+SELECT ai.embed('텍스트', 'openai');
+```
+
+- 커넥션 점유를 명시적으로 수용
+- PgBouncer session mode + statement_timeout으로 완화
+- 동기 결과가 필요한 모든 인터랙티브 쿼리에 사용
+
+**비동기 모드** — 고동시성 프로덕션용
+
+```sql
+SELECT ai.search_async('질문', 'docs')    → request_id  -- 즉시 반환
+SELECT ai.generate_async('질문', 'docs')  → request_id  -- 즉시 반환
+SELECT ai.embed_async('텍스트', 'openai') → request_id  -- 즉시 반환
+```
+
+- 커넥션 즉시 반환
+- BGW 또는 외부 워커(pipeline-worker)가 실제 처리
+- 결과는 `ai.results` 테이블 + NOTIFY hint
+
+### 결과 전달: NOTIFY는 힌트, 테이블이 진실
+
+```sql
+-- 완료 시 (BGW/워커가 수행)
+INSERT INTO ai.results(id, status, data, finished_at) VALUES (...);
+PERFORM pg_notify('ai_' || request_id::text, request_id::text);
+
+-- 클라이언트 선택 A: NOTIFY (빠르지만 persistent 커넥션 필요)
+LISTEN ai_<request_id>;
+
+-- 클라이언트 선택 B: 폴링 (PgBouncer transaction mode 호환)
+SELECT * FROM ai.results WHERE id = $1 AND status = 'done';
+```
+
+NOTIFY가 유실돼도 테이블 폴링으로 결과를 수신할 수 있다.
+pg_aidb는 어느 방식을 쓸지 강제하지 않는다.
+
+### LISTEN/NOTIFY 규모 한계
+
+LISTEN/NOTIFY는 수백 커넥션 수준까지 실용적이다. 그 이상의 규모에서는:
+- persistent 커넥션 유지 비용 → max_connections 재등장
+- 브로드캐스트 thundering herd
+
+수만 건 동시 알림이 필요하면 앞단에 Redis Pub/Sub 또는 WebSocket 서버가 필요하다.
+이는 pg_aidb 범위 밖이며, 그 규모에서는 클라이언트가 폴링 방식으로 전환하면 된다.
+
+### pg_net 사용 범위 정정
+
+기존 ADR-003에서 "플랫폼 endpoint 호출 (pg_net)"으로 기술했으나, 이를 명확히 한다:
+
+| 호출 유형 | 메커니즘 | 이유 |
+|----------|---------|------|
+| 동기 API (ai.search 등) | 직접 블로킹 HTTP | pg_net으로도 결과 대기 필요, 동일한 블로킹 |
+| 비동기 API (ai.search_async 등) | pg_net fire-and-forget | 커넥션 즉시 반환 |
+| 인제스천 파이프라인 | pipeline-worker (외부) | DB 커넥션 무관 |
+| endpoint health check | BGW (직접 HTTP) | 이미 구현됨 |
+
+---
+
 ## ADR-002: pg_aidb Extension vs Pure UDF
 
 ### 쟁점
