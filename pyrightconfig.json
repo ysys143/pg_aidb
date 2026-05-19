@@ -1,0 +1,11 @@
+{
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "services/rag/src",
+    "services/pipeline-worker/src",
+    "services/shared"
+  ],
+  "extraPaths": ["services/shared"]
+}

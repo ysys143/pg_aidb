@@ -386,7 +386,7 @@ Plan    ← 어떤 청크를 어떤 순서로 검색할지
 Execute ← vector search + rerank + 결과 조합
 ```
 
-**NL2SQL:**
+**Text2SQL:**
 ```
 Skill   ← "simple_lookup" / "analytical" / "exploratory"
             → 허용 도구 subset, 접근 전략, 스키마 탐색 범위
@@ -411,14 +411,14 @@ SELECT ai.execute(
 );
 
 SELECT ai.execute(
-    skill => 'nl2sql_analytical',
+    skill => 'text2sql_analytical',
     input => '지난달 매출 상위 10개 상품'
 );
 ```
 
-### NL2SQL 전략 쟁점 (미결)
+### Text2SQL 전략 쟁점 (미결)
 
-NL2SQL의 Plan 단계 구현 전략이 확정되지 않았다.
+Text2SQL의 Plan 단계 구현 전략이 확정되지 않았다.
 
 **옵션 A: Query DSL**
 - NL → DSL → SQL (결정론적 컴파일러)

@@ -1,0 +1,2 @@
+# using postmaster on pg, port 5432
+# command failed: "/usr/lib/postgresql/17/bin/psql" -X -q -c "SET client_min_messages = warning" -c "DROP DATABASE IF EXISTS \"aidb\"" "postgres"Bail out!

@@ -1,0 +1,30 @@
+-- embed_mock.sql: Integration test against mock OpenAI server.
+-- Requires: docker compose up -d mock (mock server on port 8080)
+-- Run via: make installcheck-mock
+
+CREATE EXTENSION IF NOT EXISTS pg_aidb;
+
+-- Register the mock endpoint
+INSERT INTO ai.endpoints(name, service, base_url)
+VALUES ('mock', 'inference', 'http://mock:8080')
+ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url;
+
+-- Register a model pointing at the mock endpoint
+INSERT INTO ai.models(name, model_type, provider, endpoint_id)
+SELECT 'mock-embed', 'embedding', 'mock', id
+FROM ai.endpoints WHERE name = 'mock'
+ON CONFLICT (name) DO NOTHING;
+
+-- embed_raw must return a non-empty float4 array
+SELECT array_length(ai.embed_raw('hello world', 'mock-embed'), 1) > 0 AS embed_raw_ok;
+
+-- embed_async must return a uuid and create a pending row
+SELECT pg_typeof(ai.embed_async('hello world', 'mock-embed')) = 'uuid'::regtype AS async_type_ok;
+
+SELECT status = 'pending' AS async_pending_ok
+FROM ai.results
+ORDER BY created_at DESC
+LIMIT 1;
+
+-- Cleanup
+DROP EXTENSION pg_aidb CASCADE;

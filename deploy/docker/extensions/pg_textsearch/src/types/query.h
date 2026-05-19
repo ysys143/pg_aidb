@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2025-2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
+ * query.h - bm25query data type interface
+ */
+#pragma once
+
+#include <postgres.h>
+
+#include <fmgr.h>
+
+/*
+ * bm25query binary format version
+ *
+ * Version history:
+ *   0: Pre-0.0.6 format with index_name string (no longer supported)
+ *   1: 0.0.6+ format with index_oid
+ *   2: 0.5.0+ adds explicit_index flag
+ */
+#define TPQUERY_VERSION 2
+
+/*
+ * Flags for TpQuery
+ */
+#define TPQUERY_FLAG_EXPLICIT_INDEX 0x01 /* Index was explicitly specified */
+
+/*
+ * tpquery data type structure
+ * Represents a query for BM25 scoring with optional index reference
+ *
+ * The index can be specified by OID (resolved at creation time) or left
+ * unresolved (InvalidOid) for later resolution by planner hooks.
+ */
+typedef struct TpQuery
+{
+	int32 vl_len_;					   /* varlena header (must be first) */
+	uint8 version;					   /* binary format version */
+	uint8 flags;					   /* flags (TPQUERY_FLAG_*) */
+	Oid	  index_oid;				   /* resolved index OID (InvalidOid if
+										* unresolved) */
+	int32 query_text_len;			   /* length of query text */
+	char  data[FLEXIBLE_ARRAY_MEMBER]; /* payload: query text only */
+} TpQuery;
+
+/* Macro for accessing query text */
+#define TPQUERY_TEXT_PTR(x) (((TpQuery *)(x))->data)
+
+/* Function declarations */
+Datum tpquery_in(PG_FUNCTION_ARGS);
+Datum tpquery_out(PG_FUNCTION_ARGS);
+Datum tpquery_recv(PG_FUNCTION_ARGS);
+Datum tpquery_send(PG_FUNCTION_ARGS);
+
+/* Constructor functions */
+Datum to_tpquery_text(PG_FUNCTION_ARGS);
+Datum to_tpquery_text_index(PG_FUNCTION_ARGS);
+
+/* Operator functions */
+Datum bm25_text_bm25query_score(PG_FUNCTION_ARGS);
+Datum bm25_text_text_score(PG_FUNCTION_ARGS);
+Datum tpquery_eq(PG_FUNCTION_ARGS);
+
+/* Utility functions */
+TpQuery *create_tpquery(const char *query_text, Oid index_oid);
+TpQuery *create_tpquery_explicit(
+		const char *query_text, Oid index_oid, bool explicit_index);
+TpQuery		  *
+create_tpquery_from_name(const char *query_text, const char *index_name);
+Oid	  get_tpquery_index_oid(TpQuery *tpquery);
+char *get_tpquery_text(TpQuery *tpquery);
+bool  tpquery_has_index(TpQuery *tpquery);
+bool  tpquery_is_explicit_index(TpQuery *tpquery);

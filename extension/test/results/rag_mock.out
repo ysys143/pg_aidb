@@ -1,0 +1,99 @@
+-- rag_mock.sql: Full RAG pipeline test against mock server.
+--
+-- Tests: create_pipeline -> ingest -> wait -> search -> ask -> cleanup
+-- Requires:
+--   docker compose up -d pg pipeline-worker rag mock
+--   pipeline-worker env: OPENAI_BASE_URL=http://mock:8080/v1/  OPENAI_API_KEY=mock-key
+--   rag env:             OPENAI_BASE_URL=http://mock:8080/v1/  OPENAI_API_KEY=mock-key
+-- Run via: make installcheck-rag-mock
+CREATE EXTENSION IF NOT EXISTS pg_aidb;
+-- Wait up to 30s for pipeline-worker to run init_schema (creates ai.documents, ai.chunks)
+DO $$
+DECLARE i int;
+BEGIN
+    FOR i IN 1..30 LOOP
+        IF EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'ai' AND table_name = 'chunks'
+        ) THEN RETURN; END IF;
+        PERFORM pg_sleep(1);
+    END LOOP;
+    RAISE EXCEPTION 'pipeline-worker schema not ready after 30s — is the service running?';
+END $$;
+ERROR:  pipeline-worker schema not ready after 30s — is the service running?
+CONTEXT:  PL/pgSQL function inline_code_block line 11 at RAISE
+-- Register rag service as the embedding endpoint
+DO $$
+BEGIN
+    INSERT INTO ai.endpoints(name, service, base_url)
+    VALUES ('rag-svc', 'rag', 'http://rag:8002')
+    ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url;
+
+    INSERT INTO ai.models(name, model_type, provider, endpoint_id)
+    SELECT 'default', 'embedding', 'mock', id
+    FROM ai.endpoints WHERE name = 'rag-svc'
+    ON CONFLICT (name) DO NOTHING;
+
+    PERFORM ai.create_pipeline(
+        'mock-rag',
+        'mock-test-col',
+        'default',
+        'default-llm',
+        '{}'
+    );
+END $$;
+-- Ingest inline content (no file parsing needed)
+SELECT pg_typeof(
+    ai.ingest(
+        'mock-doc.txt',
+        'PostgreSQL is a powerful open-source relational database system. It has advanced features including ACID compliance, complex queries, foreign keys, and extensibility via extensions.',
+        'mock-rag'
+    )
+) = 'uuid'::regtype AS ingest_uuid_ok;
+ ingest_uuid_ok 
+----------------
+ t
+(1 row)
+
+-- Wait for pipeline-worker to finish ingestion (max 60s)
+DO $$
+DECLARE
+    deadline timestamptz := now() + interval '60 seconds';
+    stat     text;
+BEGIN
+    LOOP
+        SELECT status INTO stat
+        FROM ai.results
+        WHERE data->>'op' = 'ingest'
+        ORDER BY created_at DESC LIMIT 1;
+        EXIT WHEN stat IN ('done', 'error') OR now() > deadline;
+        PERFORM pg_sleep(1);
+    END LOOP;
+    IF stat != 'done' THEN
+        RAISE EXCEPTION 'Ingestion did not complete (status=%). Check pipeline-worker logs.', stat;
+    END IF;
+END $$;
+ERROR:  canceling statement due to user request
+CONTEXT:  SQL statement "SELECT pg_sleep(1)"
+PL/pgSQL function inline_code_block line 12 at PERFORM
+-- Chunks must be stored in pgvector
+SELECT COUNT(*) > 0 AS chunks_stored
+FROM ai.chunks WHERE collection = 'mock-test-col';
+ERROR:  relation "ai.chunks" does not exist
+LINE 2: FROM ai.chunks WHERE collection = 'mock-test-col';
+             ^
+-- ai.search must return at least one chunk
+SELECT COUNT(*) > 0 AS search_returns_results
+FROM ai.search('What is PostgreSQL?', 'mock-rag', 5);
+ERROR:  ai.search: http status: HTTP status server error (500 Internal Server Error) for url (http://rag:8002/search)
+-- ai.ask must return a non-null answer
+SELECT ai.ask('What is PostgreSQL?', 'mock-rag') IS NOT NULL AS ask_returns_answer;
+ERROR:  ai.ask: http status: HTTP status server error (500 Internal Server Error) for url (http://rag:8002/ask)
+-- Cleanup (cascade from documents removes chunks)
+DELETE FROM ai.documents WHERE collection = 'mock-test-col';
+ERROR:  relation "ai.documents" does not exist
+LINE 1: DELETE FROM ai.documents WHERE collection = 'mock-test-col';
+                    ^
+DELETE FROM ai.pipelines WHERE name = 'mock-rag';
+DELETE FROM ai.results WHERE data->>'op' = 'ingest' AND data->>'source' = 'mock-doc.txt';
+DROP EXTENSION pg_aidb CASCADE;

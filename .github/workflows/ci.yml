@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: pgrx + mock E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker images
+        run: |
+          docker compose build pg builder pipeline-worker rag mock
+
+      - name: Start pg + builder
+        run: |
+          docker compose up -d pg builder
+          until docker compose ps --format json pg | grep -q '"Health":"healthy"'; do
+            sleep 2
+          done
+
+      - name: pgrx unit tests (50 tests)
+        run: |
+          docker compose exec -T builder bash -c '
+            mkdir -p /home/dev/target && chown -R dev:dev /home/dev/target
+            su -s /bin/bash dev -c "
+              export HOME=/home/dev CARGO_HOME=/home/dev/.cargo PGRX_HOME=/home/dev/.pgrx
+              export CARGO_TARGET_DIR=/home/dev/target
+              export PATH=/home/dev/.cargo/bin:\$PATH
+              cd /workspace/extension && cargo pgrx test pg17
+            "
+          '
+
+      - name: Mock RAG E2E (rag_e2e.sql)
+        run: cd extension && make run-rag-mock
+
+      - name: Mock PDF parse E2E (rag_parse.sql)
+        run: cd extension && make run-rag-parse-mock
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          echo "=== pipeline-worker ===" && docker compose logs pipeline-worker --tail=100 || true
+          echo "=== rag ==="             && docker compose logs rag             --tail=100 || true
+          echo "=== mock ==="            && docker compose logs mock            --tail=50  || true
+          echo "=== pg ==="              && docker compose logs pg              --tail=50  || true

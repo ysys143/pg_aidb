@@ -1,0 +1,49 @@
+# Build artifacts
+*.o
+*.bc
+*.so
+*.dylib
+
+# Test artifacts
+test/regression.diffs
+test/regression.out
+test/results/
+tmp_check_shared/
+
+# Coverage artifacts
+coverage-html/
+coverage.info
+*.gcda
+*.gcno
+*.gcov
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Editor configuration files
+.clang-format
+.clangd
+.editorconfig
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code files
+.claude/
+
+# VSCode files
+compile_commands.json
+target/
+__pycache__/
+*.pyc
+PR_BREAKDOWN.md
+
+# Python virtual environment
+venv/
+test/sql/*_validated.sql

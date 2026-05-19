@@ -1,0 +1,10 @@
+comment = 'AI-native PostgreSQL extension — embeddings, Text2SQL, RAG via external services'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_aidb'
+relocatable = false
+superuser = true
+trusted = false
+# DO NOT add requires = 'vector' — causes SIGSEGV in cargo pgrx test framework.
+# pgvector is a soft dependency. Users with pgvector installed can cast:
+#   SELECT ai.embed_raw('text', 'model')::vector;
+# Requires PostgreSQL 13+ for gen_random_uuid() built-in.

@@ -1,431 +1,281 @@
-# Mac에서 Linux용 PostgreSQL Extension 개발 가이드
+# pg_aidb 개발 가이드
 
-## 개요
-
-Mac에서 코드를 작성하고, Linux 환경에서 빌드/테스트하여 Linux 서버에 배포하는 워크플로우를 다룹니다.
+5분 안에 첫 테스트가 돌아갑니다. 그 뒤 일상 작업 명령과 자주 마주치는 함정을 정리합니다.
 
 ---
 
-## 왜 Linux 환경이 필요한가
+## 1. 5분 Quick Start
 
-PostgreSQL extension 빌드는 `pg_config`가 반환하는 경로와 플래그에 의존합니다.  
-Mac의 `pg_config`와 Linux의 `pg_config`는 컴파일러/링커 플래그가 다르기 때문에,  
-Linux 타겟 배포라면 반드시 Linux 환경에서 빌드해야 합니다.
+### 사전 조건
+- Docker Desktop (Mac/Linux)
+- Git, Make
+- `uv` (Python 패키지 매니저, `brew install uv`)
+- OpenAI API 키 (real 테스트만 — mock은 불필요)
 
----
-
-## 접근 방식
-
-### 1. Docker (권장)
-
-가장 일반적인 방법입니다. Mac에서 편집하고 Docker 컨테이너에서 빌드합니다.
-
-#### Dockerfile
-
-```dockerfile
-FROM postgres:16
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    postgresql-server-dev-16
-```
-
-#### 빌드 명령
-
+### 한 번만 (최초 클론 후)
 ```bash
-# 이미지 빌드
-docker build -t pg-ext-dev .
+git clone <repo> && cd pg_aidb
 
-# 컨테이너에서 빌드 + 설치
-docker run --rm -v $(pwd):/ext -w /ext pg-ext-dev \
-    bash -c "make && make install"
+# 로컬 타입 체크용 (선택)
+uv venv && uv pip install -r services/requirements-dev.txt
 
-# 대화형 셸 접속
-docker run --rm -it -v $(pwd):/ext -w /ext pg-ext-dev bash
+# 실제 API 테스트를 하려면 .env 작성
+cp .env.example .env
+# .env 열어서 OPENAI_API_KEY=sk-proj-... 채우기
+# LLM_MODEL=gpt-5.4-mini (테스트 비용 최소화)
 ```
 
-#### docker-compose.yml (개발용)
-
-```yaml
-version: "3.9"
-services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: postgres
-    volumes:
-      - .:/ext
-    ports:
-      - "5432:5432"
-
-  builder:
-    build: .
-    volumes:
-      - .:/ext
-    working_dir: /ext
-    command: bash -c "make && make install && pg_ctl start"
-```
-
----
-
-### 2. pgrx (Rust 기반 extension)
-
-Rust로 extension을 작성할 때의 표준 도구입니다.
-
+### 첫 테스트 — Mock 기반 (OpenAI 비용 0)
 ```bash
-# 설치
-cargo install cargo-pgrx
-
-# 초기화 (여러 PG 버전 로컬 설치)
-cargo pgrx init
-
-# 새 프로젝트 생성
-cargo pgrx new my_extension
-
-# 개발 서버 실행
-cargo pgrx run
-
-# 테스트
-cargo pgrx test
-
-# 배포용 패키지 생성
-cargo pgrx package
+cd extension && make run-rag-mock
 ```
+**기대 결과**: `E2E test complete — all assertions passed`
+
+이 한 줄이 동작하면:
+- Docker 컨테이너 5개 (pg + mock + pipeline-worker + rag + builder) 정상 기동
+- Extension 빌드 + 설치
+- Ingest → Search → Ask 전체 플로우
 
 ---
 
-### 3. C Extension (전통적인 방법)
+## 2. 일상 작업 명령
 
-#### 프로젝트 구조
+| 명령 | 용도 |
+|---|---|
+| `make run-rag-mock` | RAG E2E (offline, mock OpenAI) |
+| `make run-rag-real` | RAG E2E (real API, .env 필요) |
+| `make run-rag-parse-mock` | PDF 파싱 + ingest + search + ask (mock) |
+| `make run-rag-parse-real` | 동일 (real) |
+| `make run-rag-async-real` | search_async / ask_async 동작 검증 |
+| `docker compose exec builder bash -c 'cd /workspace/extension && cargo pgrx test pg17'` | pgrx 50 유닛 테스트 |
+| `.venv/bin/pyright services/...` | Python 타입 체크 (로컬 .venv 필요) |
+| `cd tests/fixtures && ../../.venv/bin/python generate.py` | PDF 픽스처 재생성 |
 
-```
-my_extension/
-├── Makefile
-├── my_extension.c
-├── my_extension.control
-└── my_extension--1.0.sql
-```
-
-#### Makefile
-
-```makefile
-MODULES = my_extension
-EXTENSION = my_extension
-DATA = my_extension--1.0.sql
-
-PG_CONFIG = pg_config
-PGXS := $(shell $(PG_CONFIG) --pgxs)
-include $(PGXS)
-```
-
-#### my_extension.control
-
-```
-comment = 'My PostgreSQL Extension'
-default_version = '1.0'
-module_pathname = '$libdir/my_extension'
-relocatable = true
-```
-
-#### my_extension.c (최소 예시)
-
-```c
-#include "postgres.h"
-#include "fmgr.h"
-
-PG_MODULE_MAGIC;
-
-PG_FUNCTION_INFO_V1(my_function);
-
-Datum
-my_function(PG_FUNCTION_ARGS)
-{
-    PG_RETURN_TEXT_P(cstring_to_text("Hello from extension!"));
-}
-```
-
-#### my_extension--1.0.sql
-
-```sql
-CREATE FUNCTION my_function()
-RETURNS text
-AS '$libdir/my_extension'
-LANGUAGE C STRICT;
-```
-
----
-
-## 빌드 및 테스트
-
+### Rust 코드 변경 후
 ```bash
-# 빌드
-make
+# 1) 컴파일 + pgrx install (Docker 내부)
+docker compose exec builder bash -c "cd /workspace/extension && cargo pgrx install --pg-config /usr/bin/pg_config"
 
-# 설치 (PostgreSQL lib 디렉토리로 복사)
-make install
+# 2) 기존 extension 제거 후 재설치
+docker compose exec pg psql -U postgres -d aidb -c "DROP EXTENSION IF EXISTS pg_aidb CASCADE; CREATE EXTENSION pg_aidb;"
 
-# PostgreSQL에서 extension 로드
-psql -c "CREATE EXTENSION my_extension;"
-
-# 테스트
-psql -c "SELECT my_function();"
-
-# 삭제
-make uninstall
+# 3) pipeline-worker 재시작 (ai 스키마 다시 만들어야 함)
+docker compose restart pipeline-worker
 ```
 
----
-
-## 개발 워크플로우
-
-```
-Mac (VS Code 편집)
-       |
-       v
-Docker / Lima (Linux 빌드 + 테스트)
-       |
-       v
-GitHub Actions (CI - ubuntu-latest)
-       |
-       v
-Linux 서버 배포 (.so + .control + .sql)
-```
-
----
-
-## CI: GitHub Actions 예시
-
-```yaml
-name: Build and Test
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-16
-
-      - name: Build
-        run: make
-
-      - name: Install
-        run: sudo make install
-
-      - name: Test
-        run: make installcheck
-        env:
-          PGPASSWORD: postgres
-```
-
----
-
-## Mac 로컬 개발 도구
-
-| 도구 | 용도 |
-|------|------|
-| VS Code + clangd | C/C++ 코드 편집 및 자동완성 |
-| Docker Desktop | Linux 빌드 환경 |
-| Lima | 경량 Linux VM (Docker 대안) |
-| pgAdmin / TablePlus | DB GUI 클라이언트 |
-| `pg_format` | SQL 포맷터 |
-
-### clangd 설정 (compile_commands.json 생성)
-
+### Python 서비스 변경 후
 ```bash
-bear -- make
+docker compose build pipeline-worker  # 또는 rag
+docker compose up -d --force-recreate pipeline-worker  # 또는 rag
 ```
 
 ---
 
-## 배포 파일 목록
+## 3. 프로젝트 구조
 
 ```
-/usr/lib/postgresql/16/lib/my_extension.so   # 공유 라이브러리
-/usr/share/postgresql/16/extension/
-    my_extension.control                      # 메타데이터
-    my_extension--1.0.sql                     # SQL 정의
+pg_aidb/
+├── extension/                  Rust pgrx 확장
+│   ├── src/
+│   │   ├── lib.rs              ai schema + 테이블 DDL (extension_sql!)
+│   │   ├── registry/mod.rs     lookup_endpoint, lookup_pipeline
+│   │   ├── client/mod.rs       reqwest blocking HTTP
+│   │   └── router/mod.rs       #[pg_extern] 함수들 (embed_raw, ingest, search, ask, *_async)
+│   ├── test/sql/               pg_regress + psql 직접 실행용 E2E SQL
+│   └── Makefile                run-rag-* 타겟들
+├── services/
+│   ├── shared/                 두 서비스 공유 모듈
+│   │   ├── embedder.py         embed(texts) - OpenAI embeddings 추상화
+│   │   ├── llm.py              generate(messages) - chat completion 추상화
+│   │   └── chunker.py          chunk(text, method, ...) - 4가지 청킹 전략
+│   ├── pipeline-worker/        LISTEN on aidb_pipeline → ingest/search/ask 처리
+│   └── rag/                    /search /ask /v1/embeddings HTTP API
+├── tests/fixtures/             sample.pdf + generate.py
+├── design/                     ARCHITECTURE, DECISIONS, HANDOFF, BACKLOG, DEV_GUIDE
+├── deploy/docker/              Dockerfile.pg/.builder/.pipeline-worker/.rag/.mock
+└── docker-compose.yml          전체 스택
 ```
+
+핵심 추상화:
+- **모델 레지스트리**: `ai.endpoints` + `ai.models` + `ai.pipelines` — 한 곳에서 변경
+- **shared abstraction**: `embedder.py` / `llm.py` — provider 교체 시 여기만
+- **NOTIFY/Outbox**: `ai._outbox` + `aidb_pipeline` 채널 — 비동기 작업의 단일 큐
 
 ---
 
-## 언어 선택: C vs Rust vs Python
+## 4. 자주 마주치는 함정
 
-### 한눈에 비교
+### A. `make run-rag-*`이 동작하지 않을 때
+```bash
+docker compose ps
+# pg / pipeline-worker / rag 모두 (healthy) 인지 확인
+docker compose logs pipeline-worker --tail=30
+```
+
+### B. `cargo pgrx test pg17`이 SIGKILL/메모리 부족
+Docker Desktop 메모리 8GB 이상 권장. 재시도하면 캐시로 빨라짐.
+
+### C. `cargo pgrx test pg17`이 Unix 소켓 오류
+**원인**: macOS Docker 마운트 볼륨에서 Unix 소켓 생성 불가  
+**해결**: 항상 `dev` 유저 + `CARGO_TARGET_DIR=/home/dev/target` (Makefile `pgrx-test`는 이미 적용)
+
+### D. `OPENAI_API_KEY: ${OPENAI_API_KEY:-}` 빈 문자열 → `APIConnectionError`
+**원인**: 빈 문자열도 SDK가 base_url로 사용  
+**해결**: `services/pipeline-worker/src/main.py`와 `rag/src/main.py` 최상단에서 `del os.environ["OPENAI_BASE_URL"]` 처리 — 이미 적용됨
+
+### E. `CREATE EXTENSION IF NOT EXISTS pg_aidb`가 옛 버전 그대로 둠
+**원인**: `cargo pgrx install`은 파일만 복사. `IF NOT EXISTS`는 기존 extension 그대로 둠.  
+**해결**: 항상 `DROP EXTENSION IF EXISTS pg_aidb CASCADE` 먼저 → `CREATE EXTENSION pg_aidb`
+
+### F. `schema ai is not a member of extension`
+**원인**: pipeline-worker가 `CREATE SCHEMA ai`로 먼저 만들었거나 이전 테스트 잔여  
+**해결**: `DROP EXTENSION IF EXISTS pg_aidb CASCADE` (스키마도 같이 정리됨) → pipeline-worker 재시작
+
+### G. DO 블록 안에서 async kickoff + polling이 안 끝남
+**원인**: DO 블록은 하나의 트랜잭션. INSERT가 commit 안 되면 pipeline-worker가 못 봄.  
+**해결**: kickoff 직후 `COMMIT;` 명시 (PostgreSQL 11+ 지원). `rag_async.sql` 참고.
+
+### H. pg_regress가 로컬 PostgreSQL을 찾으려 함
+**원인**: Mac에 PostgreSQL 미설치 + pg_regress가 Unix 소켓으로 접속 시도  
+**해결**: 항상 `docker compose exec builder` 안에서 실행 (PGHOST=pg 등 env 자동)
+
+### I. RAG E2E가 pg_regress와 충돌
+**원인**: pg_regress는 `contrib_regression` DB를 새로 만듦. pipeline-worker는 `aidb` DB만 LISTEN. NOTIFY는 DB 단위.  
+**해결**: RAG E2E는 pg_regress 대신 `psql -f rag_e2e.sql` 직접 실행 (`make run-rag-real` 사용)
+
+### J. psql `:'var'`이 DO 블록 안에서 치환 안 됨
+**원인**: psql 치환은 $$...$$ 안을 안 건드림  
+**해결**: PL/pgSQL `DECLARE`로 함수 반환값 받기 — `rag_async.sql` 참고
+
+---
+
+## 5. 새 SQL 함수 추가 워크플로우
+
+`/rag-add-function` 스킬 사용 또는 `.claude/skills/rag-add-function/SKILL.md` 참고.
+
+요점:
+1. `extension/src/router/mod.rs` — `#[pg_extern]` 함수 추가
+2. `ALTER FUNCTION ... SET search_path` extension_sql! 블록 업데이트
+3. 필요 시 `client/mod.rs`에 HTTP 호출 추가
+4. async라면 pipeline-worker에 `process_<name>` 핸들러 추가
+5. 단위 테스트 4개 이상 (happy path, panic on missing, side effect 검증)
+6. `cargo pgrx test pg17` → 모두 통과
+7. `make run-rag-mock` → 회귀 없음
+
+---
+
+## 6. 모델 프로바이더 설정 매트릭스
+
+`.env`에 아래 조합 중 하나를 채우면 됩니다.
+
+### OpenAI (기본)
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-proj-...
+EMBED_MODEL=text-embedding-3-small
+LLM_MODEL=gpt-5.4-mini
+```
+
+### Anthropic (Claude) — LLM only, 임베딩은 별도 OpenAI-compat 필요
+```bash
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_MODEL=claude-sonnet-4-6
+# 임베딩은 여전히 OpenAI/Gemini/Cohere 등 OpenAI-compat 사용
+OPENAI_API_KEY=sk-proj-...
+EMBED_MODEL=text-embedding-3-small
+```
+
+### Gemini (OpenAI 호환 모드)
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=<Google AI API key>
+OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+LLM_MODEL=gemini-3.1-flash-lite-preview
+EMBED_MODEL=gemini-embedding-001
+EMBED_DIMENSIONS=1536
+```
+
+### OpenRouter — 한 키로 다 호출
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-or-v1-...
+OPENAI_BASE_URL=https://openrouter.ai/api/v1/
+LLM_MODEL=anthropic/claude-sonnet-4-6
+EMBED_MODEL=openai/text-embedding-3-small  # 또는 voyage 등
+```
+
+### Ollama (로컬 모델)
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=ollama        # 아무 문자열
+OPENAI_BASE_URL=http://host.docker.internal:11434/v1/
+LLM_MODEL=qwen3:0.6b
+EMBED_MODEL=bona/bge-m3-korean:latest
+EMBED_DIMENSIONS=1024
+```
+
+### vLLM (자체 호스팅)
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=any
+OPENAI_BASE_URL=http://your-vllm:8000/v1/
+LLM_MODEL=meta-llama/Llama-3.2-3B-Instruct
+```
+
+핵심: **OpenAI-compatible 엔드포인트는 코드 변경 없이 env만으로 동작**. Anthropic만 별도 native SDK 어댑터.
+
+---
+
+## 7. CI
+
+`.github/workflows/ci.yml` — PR마다 자동 실행:
+- pgrx 50 유닛 테스트
+- `make run-rag-mock` (RAG E2E)
+- `make run-rag-parse-mock` (PDF 파싱 E2E)
+
+실패 시 pipeline-worker / rag / mock 로그가 자동 첨부됨.
+
+---
+
+## 7. 부록 — PostgreSQL Extension 일반 배경
+
+(아래는 새 프로젝트 시작 시 참고 — pg_aidb 작업에는 위 섹션만 필요)
+
+### 왜 Linux 환경이 필요한가
+PostgreSQL extension 빌드는 `pg_config`가 반환하는 경로와 플래그에 의존합니다. Mac의 `pg_config`와 Linux의 `pg_config`는 컴파일러/링커 플래그가 다르기 때문에, Linux 타겟 배포라면 반드시 Linux 환경에서 빌드해야 합니다.
+
+### 언어 선택: C vs Rust vs Python
 
 | 항목 | C | Rust | Python (PL/Python) |
 |------|---|------|--------------------|
-| 성능 | 최고 | C와 동급 | 낮음 (인터프리터) |
-| 안전성 | 낮음 (직접 메모리 관리) | 높음 (컴파일 타임 보장) | 높음 |
+| 성능 | 최고 | C와 동급 | 낮음 |
+| 안전성 | 낮음 | 높음 | 높음 |
 | 개발 속도 | 느림 | 중간 | 빠름 |
-| 빌드 복잡도 | 중간 (PGXS) | 낮음 (cargo-pgrx) | 없음 (설치 즉시 사용) |
-| PostgreSQL 내부 접근 | 완전 | 완전 | 제한적 |
-| 배포 | .so 파일 | .so 파일 | SQL 파일만 |
-| 학습 난이도 | 높음 | 중간-높음 | 낮음 |
-| 생태계 | PostgreSQL 표준 | 성장 중 | Python 전체 활용 가능 |
+| 빌드 복잡도 | 중간 (PGXS) | 낮음 (cargo-pgrx) | 없음 |
+| 내부 API 접근 | 완전 | 완전 | 제한적 |
 
----
+pg_aidb는 **Rust + pgrx**를 사용합니다 (cargo-pgrx 0.18). 새 프로젝트라면 동일 스택을 권장.
 
-### C
-
-PostgreSQL 자체가 C로 작성되어 있어, 내부 API를 가장 직접적으로 사용할 수 있습니다.
-
-**장점:**
-- PostgreSQL 내부 구조에 완전 접근 (Planner hook, Executor hook 등)
-- 최고 성능
-- 모든 PostgreSQL 버전 지원
-
-**단점:**
-- 메모리 오류(segfault, buffer overflow) 위험
-- `palloc` / `pfree` 등 PostgreSQL 메모리 컨텍스트를 직접 관리해야 함
-- 디버깅 어려움
-
-**적합한 경우:**
-- Custom index access method
-- Background worker
-- Planner/Executor hook
-- 기여하거나 fork할 PostgreSQL 핵심 기능
-
-```c
-#include "postgres.h"
-#include "fmgr.h"
-#include "utils/builtins.h"
-
-PG_MODULE_MAGIC;
-
-PG_FUNCTION_INFO_V1(add_two);
-
-Datum
-add_two(PG_FUNCTION_ARGS)
-{
-    int32 a = PG_GETARG_INT32(0);
-    int32 b = PG_GETARG_INT32(1);
-    PG_RETURN_INT32(a + b);
-}
+### pgrx 기본
+```bash
+cargo install cargo-pgrx
+cargo pgrx init           # PG 버전별 로컬 설치
+cargo pgrx new my_ext     # 새 프로젝트
+cargo pgrx run            # 개발 서버
+cargo pgrx test           # 테스트
+cargo pgrx package        # 배포용
 ```
 
----
-
-### Rust (pgrx)
-
-현대적인 extension 개발의 표준으로 자리잡고 있습니다.
-
-**장점:**
-- 컴파일 타임 메모리 안전성 (C의 주요 위험 제거)
-- `cargo-pgrx`로 개발 경험 우수 (`cargo pgrx run` 한 줄로 실행)
-- Rust 생태계(crates.io) 활용 가능
-- 타입 안전한 PostgreSQL API 바인딩
-
-**단점:**
-- Rust 언어 자체의 학습 곡선
-- pgrx 버전과 PostgreSQL 버전 호환성 관리 필요
-- 빌드 시간이 C보다 김
-
-**적합한 경우:**
-- 새로운 extension 프로젝트 시작 시
-- 복잡한 비즈니스 로직이 포함된 함수
-- 외부 Rust 라이브러리를 PostgreSQL 내부에서 사용할 때
-
-```rust
-use pgrx::prelude::*;
-
-pg_module_magic!();
-
-#[pg_extern]
-fn add_two(a: i32, b: i32) -> i32 {
-    a + b
-}
-
-#[cfg(any(test, feature = "pg_test"))]
-#[pg_schema]
-mod tests {
-    use pgrx::prelude::*;
-
-    #[pg_test]
-    fn test_add_two() {
-        assert_eq!(6, crate::add_two(2, 4));
-    }
-}
+### 배포 산출물
+```
+/usr/lib/postgresql/17/lib/pg_aidb.so          # 공유 라이브러리
+/usr/share/postgresql/17/extension/
+    pg_aidb.control                             # 메타데이터
+    pg_aidb--0.1.0.sql                          # SQL 정의
 ```
 
----
-
-### Python (PL/Python3u)
-
-PostgreSQL에 내장된 절차적 언어(Procedural Language)로, 별도 빌드 없이 사용합니다.
-
-**장점:**
-- 빌드 없음 - SQL 파일만으로 배포
-- Python 라이브러리(numpy, pandas, scikit-learn 등) 직접 사용 가능
-- 빠른 프로토타이핑
-- 데이터 과학/ML 워크로드에 적합
-
-**단점:**
-- 성능이 C/Rust 대비 크게 낮음
-- `u` (untrusted) 접미사 - 슈퍼유저 권한 필요
-- PostgreSQL 내부 API 접근 불가
-- Python 환경(버전, 패키지) 서버에 사전 설치 필요
-
-**적합한 경우:**
-- 데이터 변환, 집계, ML 추론 함수
-- 빠른 프로토타이핑 후 C/Rust로 재작성 예정인 경우
-- Python 라이브러리가 핵심인 기능 (예: 텍스트 분석, 통계)
-
-```sql
-CREATE EXTENSION plpython3u;
-
-CREATE FUNCTION add_two(a integer, b integer)
-RETURNS integer
-AS $$
-    return a + b
-$$ LANGUAGE plpython3u;
-
--- numpy 활용 예시
-CREATE FUNCTION array_mean(arr float8[])
-RETURNS float8
-AS $$
-    import numpy as np
-    return float(np.mean(arr))
-$$ LANGUAGE plpython3u;
-```
-
----
-
-### 언어 선택 기준
-
-```
-성능이 최우선이고 PostgreSQL 내부를 다뤄야 한다
-    → C
-
-새 프로젝트이고 안전성 + 생산성을 원한다
-    → Rust (pgrx)
-
-ML/데이터 처리이거나 빠른 프로토타이핑이 목적이다
-    → Python (PL/Python3u)
-
-Python으로 검증 후 프로덕션 성능이 필요해졌다
-    → Python → Rust로 재작성
-```
-
----
-
-## 참고
-
+### 참고
 - [PostgreSQL Extension 공식 문서](https://www.postgresql.org/docs/current/extend-extensions.html)
-- [PGXS 빌드 시스템](https://www.postgresql.org/docs/current/extend-pgxs.html)
 - [pgrx GitHub](https://github.com/pgcentralfoundation/pgrx)
+- 프로젝트 내부: `design/ARCHITECTURE.md`, `design/DECISIONS.md`, `design/HANDOFF.md`

@@ -1,0 +1,110 @@
+/*
+ * Copyright (c) 2025-2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
+ * docmap.h - Document ID mapping for segment format
+ *
+ * Posting lists use compact 4-byte segment-local doc IDs
+ * instead of 6-byte CTIDs. This module provides:
+ * - Collection of unique documents during segment build
+ * - Assignment of sequential doc IDs (0 to N-1) in CTID order
+ * - CTID → doc_id lookup during posting conversion
+ * - Arrays for CTID map and fieldnorm table
+ *
+ * INVARIANT: Doc IDs are assigned in CTID order after finalize.
+ * This means CTID order = doc_id order, so postings sorted by CTID
+ * are also sorted by doc_id, enabling sequential access to CTID arrays.
+ */
+#pragma once
+
+#include "postgres.h"
+#include "storage/itemptr.h"
+#include "utils/hsearch.h"
+
+/*
+ * Entry in the CTID → doc_id hash table (build-time only).
+ * Used to quickly look up a document's assigned ID when converting postings.
+ */
+typedef struct TpDocMapEntry
+{
+	ItemPointerData ctid;		/* Key: heap tuple location */
+	uint32			doc_id;		/* Value: segment-local doc ID */
+	uint32			doc_length; /* Document length (for fieldnorm) */
+} TpDocMapEntry;
+
+/*
+ * Document map builder context.
+ * Collects documents and assigns sequential IDs during segment write.
+ */
+typedef struct TpDocMapBuilder
+{
+	HTAB  *ctid_to_id; /* Hash table: CTID → doc_id */
+	uint32 num_docs;   /* Number of documents assigned */
+	uint32 capacity;   /* Current capacity of arrays */
+	bool   finalized;  /* True after tp_docmap_finalize called */
+
+	/* Output arrays (indexed by doc_id, valid after finalize) */
+	BlockNumber	 *ctid_pages;	/* doc_id → page number (4 bytes) */
+	OffsetNumber *ctid_offsets; /* doc_id → tuple offset (2 bytes) */
+	uint8		 *fieldnorms;	/* doc_id → encoded length (1 byte) */
+} TpDocMapBuilder;
+
+/*
+ * Create a new document map builder (constructor).
+ * Call this before collecting documents.
+ */
+extern TpDocMapBuilder *tp_docmap_create(void);
+
+/*
+ * Add a document to the map.
+ * Returns the assigned doc_id (reuses existing ID if CTID already present).
+ * doc_length is stored for fieldnorm encoding; if CTID already exists, the
+ * original doc_length is kept (callers should ensure consistent lengths).
+ */
+extern uint32
+tp_docmap_add(TpDocMapBuilder *builder, ItemPointer ctid, uint32 doc_length);
+
+/*
+ * Look up doc_id for a CTID using hash table.
+ * Returns UINT32_MAX if not found.
+ */
+extern uint32 tp_docmap_lookup(TpDocMapBuilder *builder, ItemPointer ctid);
+
+/*
+ * Finalize the document map.
+ * Builds the ctid arrays and fieldnorms array sorted by doc_id.
+ * After this call, the hash table is no longer needed.
+ */
+extern void tp_docmap_finalize(TpDocMapBuilder *builder);
+
+/*
+ * Free the document map builder and all associated memory.
+ */
+extern void tp_docmap_destroy(TpDocMapBuilder *builder);
+
+/*
+ * Get the CTID for a doc_id. Requires finalize to have been called.
+ * Reconstructs ItemPointerData from the split storage.
+ */
+static inline void
+tp_docmap_get_ctid(TpDocMapBuilder *builder, uint32 doc_id, ItemPointer result)
+{
+	Assert(builder->finalized);
+	Assert(doc_id < builder->num_docs);
+	ItemPointerSet(
+			result,
+			builder->ctid_pages[doc_id],
+			builder->ctid_offsets[doc_id]);
+}
+
+/*
+ * Get the fieldnorm for a doc_id. Requires finalize to have been called.
+ */
+static inline uint8
+tp_docmap_get_fieldnorm(TpDocMapBuilder *builder, uint32 doc_id)
+{
+	Assert(builder->finalized);
+	if (doc_id >= builder->num_docs)
+		return 0;
+	return builder->fieldnorms[doc_id];
+}

@@ -27,7 +27,7 @@ pg_cuvs는 pg_aidb 없이도 독립적으로 동작한다.
 │                PostgreSQL + pg_aidb                      │
 │                                                         │
 │  ai.execute(skill, input)   ai.predict()                │
-│  ai.nl2sql()  ai.ingest()   ai.vector_search()          │
+│  ai.text2sql()  ai.ingest()   ai.vector_search()          │
 │                                                         │
 │  ┌──────────────────┐  ┌──────────────────────────┐    │
 │  │  model_registry  │  │   platform state views   │    │
@@ -40,7 +40,7 @@ pg_cuvs는 pg_aidb 없이도 독립적으로 동작한다.
    ┌────────┴────────┬──────────────┬──────────────┐
    ▼                 ▼              ▼              ▼
 ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐
-│inference │  │  nl2sql  │  │   rag    │  │  pipeline    │
+│inference │  │  text2sql  │  │   rag    │  │  pipeline    │
 │  :8001   │  │  :8003   │  │  :8002   │  │  worker      │
 │          │  │          │  │          │  │              │
 │ ONNX     │  │ Skill-   │  │ Skill-   │  │ chunking     │
@@ -83,7 +83,7 @@ Execute ← skill이 허용한 tool로만 실행
 
 ```sql
 SELECT ai.execute(skill => 'semantic_search', input => '사용자 질문');
-SELECT ai.execute(skill => 'nl2sql_analytical', input => '지난달 매출 상위 10개');
+SELECT ai.execute(skill => 'text2sql_analytical', input => '지난달 매출 상위 10개');
 SELECT ai.execute(skill => 'hybrid_search', input => '...', config => '{"top_k":10}'::jsonb);
 ```
 
@@ -93,7 +93,7 @@ SELECT ai.execute(skill => 'hybrid_search', input => '...', config => '{"top_k":
 |----------|------|------|
 | extension | Rust (pgrx) | in-process 안전성, C 수준 성능 |
 | inference-service | Python (FastAPI) | onnxruntime 공식 SDK |
-| nl2sql-service | Python (FastAPI) | schema inspection + LLM (OpenAI-compatible) |
+| text2sql-service | Python (FastAPI) | schema inspection + LLM (OpenAI-compatible) |
 | rag-service | Python (FastAPI) | embedding, retrieval, reranking |
 | pipeline-worker | Python | chunking, indexing, document ingestion (async) |
 
@@ -119,7 +119,7 @@ CREATE TABLE ai.models (
 CREATE TABLE ai.endpoints (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name        text UNIQUE NOT NULL,
-    service     text NOT NULL,        -- 'inference' | 'nl2sql' | 'rag' | 'pipeline'
+    service     text NOT NULL,        -- 'inference' | 'text2sql' | 'rag' | 'pipeline'
     base_url    text NOT NULL,
     api_key_env text,                 -- 환경변수 이름 (값 직접 저장 금지)
     health_url  text GENERATED ALWAYS AS (base_url || '/health') STORED,
@@ -181,7 +181,7 @@ POST /predict/batch
      -> { "outputs": [any], "model": str, "latency_ms": int }
 ```
 
-### nl2sql-service (:8003)
+### text2sql-service (:8003)
 
 Skill-Plan-Execute 패턴으로 처리. 모든 LLM은 OpenAI-compatible API로 추상화.
 
@@ -193,7 +193,7 @@ POST /execute
 GET  /skills  ->  등록된 skill 목록
 ```
 
-nl2sql-service 내부 컴포넌트:
+text2sql-service 내부 컴포넌트:
 - schema inspector (pg_catalog 조회)
 - schema RAG (관련 테이블 선별)
 - skill registry (skill별 전략 + tool subset 정의)
@@ -260,15 +260,15 @@ SELECT * FROM ai.results WHERE id = $1 AND status = 'done';
 ```sql
 -- Skill-Plan-Execute 공통 인터페이스
 SELECT ai.execute(skill => 'semantic_search', input => '사용자 질문');
-SELECT ai.execute(skill => 'nl2sql_analytical', input => '지난달 매출 상위 10개');
+SELECT ai.execute(skill => 'text2sql_analytical', input => '지난달 매출 상위 10개');
 
 -- 단일 추론
 SELECT ai.predict('model-name', '{"input": "..."}'::jsonb);
 SELECT ai.batch_predict('model-name', ARRAY['{"text":"..."}']::jsonb[]);
 
--- NL2SQL
-SELECT ai.nl2sql('최근 7일간 가장 많이 팔린 상품 10개');
-SELECT ai.nl2sql('...', skill => 'nl2sql_analytical', model_name => 'gpt-4o');
+-- Text2SQL
+SELECT ai.text2sql('최근 7일간 가장 많이 팔린 상품 10개');
+SELECT ai.text2sql('...', skill => 'text2sql_analytical', model_name => 'gpt-5.4');
 
 -- 문서 ingestion
 SELECT ai.ingest(content, 'default-pipeline') FROM documents;
@@ -314,7 +314,7 @@ pg_aidb/deploy/
 | PostgreSQL | 5432 |
 | inference | 8001 |
 | rag | 8002 |
-| nl2sql | 8003 |
+| text2sql | 8003 |
 | pipeline-worker | - (HTTP 없음) |
 
 ### 프로덕션 - Helm (Kubernetes)
@@ -327,7 +327,7 @@ pg_aidb/deploy/helm/
 └── templates/
     ├── inference/
     ├── rag/
-    ├── nl2sql/
+    ├── text2sql/
     └── pipeline-worker/
 ```
 
@@ -336,7 +336,7 @@ pg_aidb/deploy/helm/
 1. `model_registry` SQL 스키마 + CRUD 함수
 2. `inference-service` + ONNX 런타임
 3. `rag-service` + Skill-Plan-Execute + embedding/retrieval
-4. `nl2sql-service` + schema inspector + skill registry + query cache
+4. `text2sql-service` + schema inspector + skill registry + query cache
 5. `pipeline-worker` + chunking + indexing
 6. 플랫폼 상태 테이블 + extension projection view
 7. Docker Compose 전체 스택

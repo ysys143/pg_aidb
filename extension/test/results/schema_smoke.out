@@ -1,0 +1,79 @@
+-- schema_smoke.sql: Verify extension installs cleanly with correct schema.
+-- No external services required. Runs under default `make installcheck`.
+CREATE EXTENSION IF NOT EXISTS pg_aidb;
+-- Tables must exist
+SELECT
+    to_regclass('ai.endpoints') IS NOT NULL AS endpoints_ok,
+    to_regclass('ai.models')    IS NOT NULL AS models_ok,
+    to_regclass('ai.results')   IS NOT NULL AS results_ok;
+ endpoints_ok | models_ok | results_ok 
+--------------+-----------+------------
+ t            | t         | t
+(1 row)
+
+-- Functions must exist
+SELECT
+    count(*) = 1 AS embed_raw_ok
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ai' AND p.proname = 'embed_raw';
+ embed_raw_ok 
+--------------
+ t
+(1 row)
+
+SELECT
+    count(*) = 1 AS embed_async_ok
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ai' AND p.proname = 'embed_async';
+ embed_async_ok 
+----------------
+ t
+(1 row)
+
+-- embed_async return type must be uuid
+SELECT
+    t.typname = 'uuid' AS embed_async_returns_uuid
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+JOIN pg_type t       ON t.oid = p.prorettype
+WHERE n.nspname = 'ai' AND p.proname = 'embed_async';
+ embed_async_returns_uuid 
+--------------------------
+ t
+(1 row)
+
+-- ai.results columns
+SELECT
+    count(*) = 8 AS results_column_count
+FROM information_schema.columns
+WHERE table_schema = 'ai' AND table_name = 'results';
+ results_column_count 
+----------------------
+ t
+(1 row)
+
+-- pending_timeout_at default is ~5 minutes from now
+INSERT INTO ai.endpoints(name, service, base_url)
+VALUES ('smoke-ep', 'inference', 'http://localhost:9999')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO ai.models(name, model_type, provider, endpoint_id)
+SELECT 'smoke-model', 'embedding', 'mock', id
+FROM ai.endpoints WHERE name = 'smoke-ep'
+ON CONFLICT (name) DO NOTHING;
+SELECT
+    (pending_timeout_at - created_at) BETWEEN interval '4 minutes 50 seconds'
+                                           AND interval '5 minutes 10 seconds' AS timeout_ok
+FROM ai.results
+WHERE request_id IN (
+    -- embed_async inserts a row; verify via direct INSERT with same shape
+    SELECT gen_random_uuid()
+)
+LIMIT 0; -- just verify column exists, value tested in embed_mock
+ timeout_ok 
+------------
+(0 rows)
+
+-- Cleanup
+DROP EXTENSION pg_aidb CASCADE;

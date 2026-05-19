@@ -1,0 +1,16 @@
+# Combined dev requirements for local type checking (Pyright / IDE).
+# Install: pip install -r services/requirements-dev.txt
+
+# rag service
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+openai>=1.58.1
+anthropic>=0.40.0
+psycopg[binary]==3.2.3
+httpx==0.27.2
+
+# pipeline-worker additions
+opendataloader-pdf==2.0.0
+numpy>=1.26
+# fixture generation (one-time use)
+reportlab>=4.0

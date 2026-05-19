@@ -1,0 +1,31 @@
+# Runtime PostgreSQL image for pg_aidb.
+# Must match builder base — same pgvector/pgvector:pg17 (Bookworm/GLIBC 2.36).
+# Do NOT use postgres:17 (Trixie/GLIBC 2.38): .so built on Bookworm will not load. (HANDOFF.md §6)
+FROM pgvector/pgvector:pg17
+
+# Build deps for the two text-search extensions vendored under ./extensions/.
+# Kept in the same RUN as the builds so apt cache + headers ship in one layer
+# we can prune at the end.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        postgresql-server-dev-17 \
+        ca-certificates \
+        mecab libmecab-dev mecab-ipadic-utf8 \
+ && rm -rf /var/lib/apt/lists/*
+
+# textsearch_ko — Korean MeCab tsvector ('korean' text search config).
+# Source vendored from /Users/jaesolshin/Documents/GitHub/textsearch.
+COPY extensions/textsearch_ko /tmp/textsearch_ko
+RUN cd /tmp/textsearch_ko \
+ && make USE_PGXS=1 PG_CONFIG=/usr/bin/pg_config \
+ && make USE_PGXS=1 PG_CONFIG=/usr/bin/pg_config install \
+ && rm -rf /tmp/textsearch_ko
+
+# pg_textsearch — BM25 ranking + bm25 access method.
+# Source vendored from /Users/jaesolshin/Documents/GitHub/textsearch/vendor.
+# Requires shared_preload_libraries=pg_textsearch at runtime (set in docker-compose).
+COPY extensions/pg_textsearch /tmp/pg_textsearch
+RUN cd /tmp/pg_textsearch \
+ && make PG_CONFIG=/usr/bin/pg_config \
+ && make PG_CONFIG=/usr/bin/pg_config install \
+ && rm -rf /tmp/pg_textsearch

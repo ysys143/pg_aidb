@@ -1,0 +1,141 @@
+services:
+  # PostgreSQL runtime with pgvector pre-installed.
+  # Base image MUST match builder (Bookworm GLIBC 2.36). See HANDOFF.md §6.
+  pg:
+    build:
+      context: ./deploy/docker
+      dockerfile: Dockerfile.pg
+    # pg_textsearch must be in shared_preload_libraries (it registers a planner hook
+    # and shared-memory state at startup). textsearch_ko does not require preload.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_textsearch
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: aidb
+      POSTGRES_USER: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      # Shared with builder so cargo pgrx install writes directly into pg's directories.
+      # Named volumes copy from image on first creation (includes pgvector files).
+      - pg_ext:/usr/share/postgresql/17/extension
+      - pg_lib:/usr/lib/postgresql/17/lib
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Rust build environment. Compiles and installs pg_aidb into the pg container.
+  # Dev usage:  docker compose run --rm builder bash
+  # CI usage:   docker compose run --rm -e USER=dev -e PGHOST=pg -e PGPASSWORD=dev builder bash -c \
+  #               "cargo pgrx install --pg-config /usr/bin/pg_config && make installcheck"
+  # command: sleep infinity prevents accidental postgres start (HANDOFF.md §6).
+  builder:
+    build:
+      context: ./deploy/docker
+      dockerfile: Dockerfile.builder
+    user: "0"   # root: dev-only container; needs to write to pg_ext/pg_lib volumes
+    command: ["sleep", "infinity"]
+    volumes:
+      - .:/workspace
+      # Same shared volumes — cargo pgrx install writes here and pg reads it.
+      - pg_ext:/usr/share/postgresql/17/extension
+      - pg_lib:/usr/lib/postgresql/17/lib
+    working_dir: /workspace/extension
+    environment:
+      USER: root
+      HOME: /home/dev        # use dev's cargo/pgrx installations
+      PATH: /home/dev/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      CARGO_HOME: /home/dev/.cargo
+      PGRX_HOME: /home/dev/.pgrx
+      PGHOST: pg
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: dev
+    depends_on:
+      pg:
+        condition: service_healthy
+
+  # Async document ingestion worker.
+  # LISTENs on 'aidb_pipeline' PostgreSQL channel.
+  # Runs schema.sql on startup to create ai.documents + ai.chunks (pgvector).
+  # For mock tests: set OPENAI_BASE_URL=http://mock:8080/v1/ OPENAI_API_KEY=mock-key
+  pipeline-worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.pipeline-worker
+    ports:
+      - "8001:8001"
+    # Mount test fixtures read-only so ai.ingest(source='/data/sample.pdf', '') works.
+    volumes:
+      - ./tests/fixtures:/data:ro
+    environment:
+      DATABASE_URL: postgresql://postgres:dev@pg:5432/aidb
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-mock-key}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      EMBED_MODEL: ${EMBED_MODEL:-text-embedding-3-small}
+      # vector(N) width for ai.chunks.embedding. Must match EMBED_MODEL's output dim.
+      EMBED_DIMENSIONS: ${EMBED_DIMENSIONS:-1536}
+      # rag service URL — used by async search/ask handlers
+      RAG_URL: ${RAG_URL:-http://rag:8002}
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RAG service: similarity search + LLM generation.
+  # Called by ai.search() and ai.ask() via HTTP (HANDOFF.md §3 Phase 2).
+  # Also serves POST /v1/embeddings for ai.embed_raw compatibility.
+  # For mock tests: set OPENAI_BASE_URL=http://mock:8080/v1/ OPENAI_API_KEY=mock-key
+  rag:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.rag
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql://postgres:dev@pg:5432/aidb
+      # LLM provider: openai (default, OpenAI-compat too) | anthropic
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-mock-key}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      EMBED_MODEL: ${EMBED_MODEL:-text-embedding-3-small}
+      # Must match pipeline-worker's EMBED_DIMENSIONS so query and stored vecs align.
+      EMBED_DIMENSIONS: ${EMBED_DIMENSIONS:-1536}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.4-mini}
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Mock OpenAI server for offline regression tests.
+  # GET  /health        -> 200 {}
+  # POST /v1/embeddings -> 4-dim embedding fixture
+  mock:
+    build:
+      context: ./deploy/docker
+      dockerfile: Dockerfile.mock
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pg_ext:   # /usr/share/postgresql/17/extension — shared between pg and builder
+  pg_lib:   # /usr/lib/postgresql/17/lib — shared between pg and builder

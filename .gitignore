@@ -1,7 +1,11 @@
 .cwf
 .omc
+.claude/
 .venv
 .env
+.env.test
+.env.*.local
+_workspace/
 node_modules/
 __pycache__/
 *.pyc
@@ -12,3 +16,7 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Rust build artifacts
+extension/target/
+extension/Cargo.lock

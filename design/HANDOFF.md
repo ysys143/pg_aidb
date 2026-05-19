@@ -28,7 +28,7 @@ fn my_func(input: &str) -> String {
 #[pg_extern]
 fn with_default(
     input: &str,
-    model: default!(&str, "'gpt-4o'"),
+    model: default!(&str, "'gpt-5.4'"),
 ) -> String { ... }
 ```
 
@@ -392,7 +392,7 @@ PERFORM pg_notify('ai_' || $1::text, $1::text);
 3. **ai.results 테이블**: 비동기 모드 기반 인프라
 4. **동기 HTTP 클라이언트**: reqwest blocking, endpoint 조회 → HTTP POST
 5. **ai.embed() 동기**: credentials 조회(SPI) → HTTP → float4[] 반환
-6. **ai.embed_async()**: pg_net fire-and-forget → request_id 반환
+6. **ai.embed_async()**: `ai.results`에 `status='pending'` 행 INSERT → `pg_notify('ai_' || request_id::text, request_id::text)` 힌트 발행 → UUID 즉시 반환. ADR-006에 따라 **pg_net 미사용**. 클라이언트는 `LISTEN "ai_<uuid>"` 또는 `ai.results` 폴링 중 선택.
 7. **Docker Compose**: pg + builder + mock 서비스
 8. **regression test**: mock 포함/제외 두 타겟
 
