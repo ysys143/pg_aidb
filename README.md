@@ -1,5 +1,8 @@
 # pg_aidb
 
+[![CI](https://github.com/ysys143/pg_aidb/actions/workflows/ci.yml/badge.svg)](https://github.com/ysys143/pg_aidb/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ysys143/pg_aidb)](https://github.com/ysys143/pg_aidb/releases)
+
 PostgreSQL용 in-DB AI 플랫폼. 임베딩 · 벡터 검색 · RAG를 SQL 함수로 노출하고, 무거운 컴퓨트는 외부 마이크로서비스로 분리한다.
 
 ```sql

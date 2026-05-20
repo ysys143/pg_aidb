@@ -44,6 +44,14 @@ jobs:
       - name: Mock PDF parse E2E (rag_parse.sql)
         run: cd extension && make run-rag-parse-mock
 
+      # Hybrid search needs a real OpenAI key for embeddings.
+      # Skipped automatically when the secret is missing (forks, dependabot).
+      - name: Hybrid search E2E (rag_hybrid.sql)
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: cd extension && make run-rag-hybrid-real
+
       - name: Dump service logs on failure
         if: failure()
         run: |
