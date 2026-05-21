@@ -195,6 +195,115 @@ CI는 CPU 경로로 실행. GPU 테스트는 별도 환경에서 실행.
 
 ---
 
+## 9. GCP GPU VM 개발 환경 구성
+
+로컬 맥에 NVIDIA GPU가 없으므로 GCP 인스턴스에서 빌드/테스트를 진행한다.
+pg_aidb 개발에서 얻은 교훈을 그대로 적용한다.
+
+### 9.1 기본 구조
+
+```
+로컬 맥 (코드 편집)           GCP GPU VM (빌드 + 테스트)
+────────────────────         ──────────────────────────
+VSCode Remote SSH ─────────→ CUDA + PostgreSQL + pg_cuvs
+make 로컬 타깃 실행 ─────────→ SSH로 원격 실행 + 결과 스트리밍
+```
+
+### 9.2 pg_aidb 교훈 → pg_cuvs 적용
+
+**교훈 1: named volume 함정** (pg_aidb에서 `.so`가 옛 볼륨에 잔류해 `down -v`를 반복)
+
+pg_cuvs는 Docker 볼륨 대신 **bind mount + 명시적 copy**로 해결:
+```makefile
+define INSTALL_EXT
+    sudo cp pg_cuvs.so $(PG_LIBDIR)/
+    sudo cp pg_cuvs.control $(PG_EXTDIR)/
+    sudo cp sql/pg_cuvs--*.sql $(PG_EXTDIR)/
+endef
+```
+
+**교훈 2: 백그라운드 + pipe 잘못 쓰면 출력 0바이트** (pg_aidb에서 `| tail -40`으로 중간 출력 차단)
+
+모든 GCP 원격 명령은 `ssh -tt` + `tee`로 실시간 스트리밍:
+```makefile
+gpu-build:
+    ssh -tt $(GCP_VM) "cd ~/pg_cuvs && make 2>&1 | tee /tmp/build.log"
+```
+
+**교훈 3: make가 유일한 진입점** (pg_aidb에서 make 우회 → BOOTSTRAP_PG 누락)
+
+GCP 원격 실행도 전부 make 타깃으로 캡슐화:
+```makefile
+gpu-test:
+    ssh $(GCP_VM) "cd ~/pg_cuvs && make test"
+
+gpu-bench:
+    ssh $(GCP_VM) "cd ~/pg_cuvs && make benchmark 2>&1" | tee design/bench_$(shell date +%Y%m%d).log
+```
+
+**교훈 4: `.env`로 환경 변수 관리** (gitignore, 실제 값 커밋 금지)
+
+```bash
+# .env.gpu
+GCP_VM=user@34.xxx.xxx.xxx
+GCP_INSTANCE=pg-cuvs-dev
+GCP_ZONE=us-central1-a
+CUDA_VERSION=12.4
+CONDA_ENV=cuvs_dev
+```
+
+### 9.3 GCP 인스턴스 스펙
+
+- `g2-standard-4` — NVIDIA L4 1개, 4 vCPU, 16GB RAM, 100GB SSD
+- OS: Ubuntu 22.04 LTS
+- **Spot 인스턴스** 권장 — 비용 60~70% 절감, 개발 중 인터럽트 허용
+
+### 9.4 Makefile 라이프사이클
+
+```makefile
+# VM 시작/중지 — idle 비용 방지
+vm-start:
+    gcloud compute instances start $(GCP_INSTANCE) --zone $(GCP_ZONE)
+    @until ssh -o ConnectTimeout=5 $(GCP_VM) true 2>/dev/null; do sleep 3; done
+    @echo "VM ready"
+
+vm-stop:
+    gcloud compute instances stop $(GCP_INSTANCE) --zone $(GCP_ZONE)
+
+# 코드 동기화
+sync:
+    rsync -avz --exclude '.git' --exclude 'build' . $(GCP_VM):~/pg_cuvs/
+```
+
+### 9.5 테스트 계층 분리
+
+| 계층 | 실행 위치 | 명령 | GPU 필요 |
+|---|---|---|---|
+| C 컴파일 확인 | 로컬 또는 GCP | `make check-syntax` | 불필요 |
+| CPU fallback 테스트 | GCP (`enable_cuvs=off`) | `make test-cpu` | 불필요 |
+| GPU 정확성 테스트 | GCP | `make test-gpu` | 필요 |
+| 벤치마크 | GCP | `make benchmark` | 필요 |
+
+`make test-cpu`는 `SET enable_cuvs = off`로 비활성화 — pg_cuvs의 Graceful Degradation을 활용해 GPU 없이도 CPU path 검증.
+
+### 9.6 일일 워크플로우
+
+```bash
+# 작업 시작 — VM 켜고 코드 동기화
+make vm-start sync
+
+# 개발 루프 (로컬 편집 → GCP 빌드 → 결과 확인)
+make sync gpu-build gpu-test
+
+# 벤치마크 — 결과 로컬 로그에 자동 저장
+make gpu-bench   # design/bench_YYYYMMDD.log에 tee
+
+# 작업 종료 — VM 종료
+make vm-stop
+```
+
+---
+
 ## 8. 참고
 
 - [pg_cuvs](https://github.com/ysys143/pg_cuvs) — GPU 사이드카 모델, CAGRA/DiskANN AM
