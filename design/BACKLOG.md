@@ -64,10 +64,11 @@
 - **검증**: rag_hybrid.sql E2E 3개 assertion 통과 (content_tsv 컬럼, function 존재, 결과 반환).
 - **부가 발견**: pg_textsearch `<@>` 연산자는 window함수 ORDER BY에서 planner rewrite 안 됨 → 명시적 `to_bm25query(query, 'ai_chunks_bm25_idx')` 필요. pg named volume이 이미지 재빌드 후에도 옛 .so 잔류 → `docker compose down -v` 필수.
 
-### A8. 결과 다양화 (MMR) [NEW 2026-05-20]
-- **현재**: top_k가 비슷한 청크로 채워짐 (semantic similarity가 의미적 중복 선호).
-- **작업**: rag service `/search`에 `diversity` 옵션 추가 — Maximal Marginal Relevance로 결과 다양화.
-- **이유**: ask가 더 다양한 컨텍스트로 답변 생성, 정확도 향상.
+### A8. 결과 다양화 (MMR) [DONE 2026-05-22]
+- **결과**: `ai.search_mmr(query, pipeline, top_k, fetch_k, lambda_param, filter)` — Maximal Marginal Relevance greedy 선택.
+- **구현**: rag service `/search_mmr` 엔드포인트. `fetch_k` 후보를 pgvector에서 embedding 벡터째 가져와 Python numpy로 λ·sim(d,q)-(1-λ)·max_j sim(d,dj) 최대화. Rust: `call_search_mmr` + `search_mmr_impl` (9번째 pg_extern).
+- **파라미터**: `fetch_k=20` (후보 풀), `lambda_param=0.5` (1=순수 relevance, 0=순수 diversity).
+- **검증**: rag_mmr.sql — 3개 PostgreSQL 유사 문서 + 1개 Python 문서 → MMR top-3에 Python 문서 포함 (`mmr_includes_diverse_result=t`).
 
 ### A9. 컨텍스트 윈도우 관리 [NEW 2026-05-20]
 - **문제**: 큰 문서 + top_k 늘리면 LLM 컨텍스트 초과.
