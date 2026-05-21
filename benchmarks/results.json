@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-05-22T01:44:12.661117",
+  "config": {
+    "host": "localhost",
+    "port": 5432,
+    "n_docs": 20,
+    "n_queries": 10
+  },
+  "ingest": {
+    "n_docs": 20,
+    "elapsed_s": 1.05,
+    "docs_per_min": 1141.3
+  },
+  "search": {
+    "dense": {
+      "p50_ms": 227.8,
+      "p95_ms": 284.8,
+      "p99_ms": 296.6,
+      "mean_ms": 231.0
+    },
+    "hybrid": {
+      "p50_ms": 226.4,
+      "p95_ms": 394.3,
+      "p99_ms": 439.9,
+      "mean_ms": 239.8
+    },
+    "mmr": {
+      "p50_ms": 229.2,
+      "p95_ms": 286.9,
+      "p99_ms": 297.5,
+      "mean_ms": 233.9
+    }
+  },
+  "ask": {
+    "p50_ms": 1294.8,
+    "p95_ms": 2176.1,
+    "mean_ms": 1437.5
+  }
+}
