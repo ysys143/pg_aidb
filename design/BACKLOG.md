@@ -51,10 +51,11 @@
 - **설계**: `ai.attach_source(pipeline, table, columns)` → AFTER INSERT/UPDATE/DELETE 트리거 자동 설치 → trigger가 `ai.ingest()` 호출 (또는 직접 outbox INSERT).
 - **고려**: 트리거 cascade · 삭제 동기화 (chunk 정리) · 변경 감지 효율 (timestamp/hash 기반 증분).
 
-### A6. 메타데이터 필터링 [NEW 2026-05-20]
-- **현재**: `ai.search(query, pipeline, top_k)` — 컬렉션 단위 필터만.
-- **작업**: `ai.search(..., filter => '{"source":"x.pdf","date":">2024"}')` jsonb 필터 → pgvector 쿼리에 WHERE 조건 자동 추가. 인덱스는 metadata jsonb GIN.
-- **이유**: 실사용에서 거의 항상 필요. 도메인 필터 없이 RAG는 노이즈가 큼.
+### A6. 메타데이터 필터링 [DONE 2026-05-22]
+- **결과**: `ai.search(query, pipeline, top_k, filter jsonb DEFAULT '{}')` 추가. `metadata @> filter` (JSONB containment) 로 WHERE 조건 적용.
+- **전파**: `ai.search`, `ai.ask`, `ai.search_hybrid` 모두 filter 파라미터 지원.
+- **검증**: rag_filter.sql E2E — category=database/python 필터 3개 assertion 통과.
+- **부가 발견**: 벡터 검색은 threshold 없어서 "0개 반환" 단언 불가 — 필터 정확성은 "반환된 결과가 모두 기대한 category인지"로 검증해야 함.
 
 ### A7. 하이브리드 검색 (벡터 + tsvector) [NEW 2026-05-20]
 - **동기**: 의미 검색만으로는 정확한 키워드 일치 (사람 이름, 코드, 숫자) 놓침.

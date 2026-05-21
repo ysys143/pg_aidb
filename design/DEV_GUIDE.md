@@ -44,6 +44,8 @@ cd extension && make run-rag-mock
 |---|---|
 | `make run-rag-mock` | RAG E2E (offline, mock OpenAI) |
 | `make run-rag-real` | RAG E2E (real API, .env 필요) |
+| `make run-rag-filter-real` | metadata filter E2E (real API) |
+| `make run-rag-hybrid-real` | 한국어 hybrid search E2E (real API) |
 | `make run-rag-parse-mock` | PDF 파싱 + ingest + search + ask (mock) |
 | `make run-rag-parse-real` | 동일 (real) |
 | `make run-rag-async-real` | search_async / ask_async 동작 검증 |
@@ -164,7 +166,39 @@ Docker Desktop 메모리 8GB 이상 권장. 재시도하면 캐시로 빨라짐.
 
 ---
 
-## 6. 모델 프로바이더 설정 매트릭스
+## 6. SQL API 레퍼런스
+
+### 기본 검색
+```sql
+-- dense-only (기본)
+SELECT * FROM ai.search('What is PostgreSQL?', 'my-pipeline', 5);
+
+-- metadata filter (JSONB containment)
+SELECT * FROM ai.search('What is PostgreSQL?', 'my-pipeline', 5,
+    '{"category": "database"}');
+
+-- 복합 filter
+SELECT * FROM ai.search('query', 'pipeline', 5,
+    '{"author": "Kim", "lang": "ko"}');
+```
+
+### 하이브리드 검색 (BM25 + dense + RRF)
+```sql
+SELECT * FROM ai.search_hybrid('PostgreSQL', 'my-pipeline', 5);
+
+-- filter 적용
+SELECT * FROM ai.search_hybrid('PostgreSQL', 'my-pipeline', 5,
+    rrf_k => 60, filter => '{"category": "database"}');
+```
+
+### LLM 응답
+```sql
+SELECT ai.ask('What is PostgreSQL?', 'my-pipeline');
+```
+
+---
+
+## 7. 모델 프로바이더 설정 매트릭스
 
 `.env`에 아래 조합 중 하나를 채우면 됩니다.
 
