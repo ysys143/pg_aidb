@@ -85,8 +85,8 @@ def setup(conn: psycopg.Connection, pipeline: str = "bench") -> None:
         SELECT 'default', 'embedding', 'openai', id FROM ai.endpoints WHERE name = 'rag-svc'
         ON CONFLICT (name) DO NOTHING
     """)
-    conn.execute(  # type: ignore[arg-type]
-        f"SELECT ai.create_pipeline('{pipeline}', '{pipeline}-col', 'default', 'default-llm', '{{}}')"
+    conn.execute(
+        f"SELECT ai.create_pipeline('{pipeline}', '{pipeline}-col', 'default', 'default-llm', '{{}}')"  # type: ignore[arg-type]
     )
 
 
@@ -123,9 +123,20 @@ def bench_ingest(conn: psycopg.Connection, docs: list, pipeline: str) -> dict:
         time.sleep(1)
 
     elapsed = time.perf_counter() - t0
-    throughput = len(docs) / (elapsed / 60)  # docs/min
-    print(f"  Elapsed: {elapsed:.1f}s  Throughput: {throughput:.1f} docs/min")
-    return {"n_docs": len(docs), "elapsed_s": round(elapsed, 2), "docs_per_min": round(throughput, 1)}
+    total_chars = sum(len(content) for content, _ in docs)
+    # ~4 chars per token (rough English estimate); use for relative comparison only
+    est_tokens = total_chars / 4
+    chars_per_min = total_chars / (elapsed / 60)
+    tokens_per_min = est_tokens / (elapsed / 60)
+    print(f"  Elapsed: {elapsed:.1f}s  {chars_per_min:.0f} chars/min  ~{tokens_per_min:.0f} est-tokens/min")
+    return {
+        "n_docs": len(docs),
+        "total_chars": total_chars,
+        "est_tokens": round(est_tokens),
+        "elapsed_s": round(elapsed, 2),
+        "chars_per_min": round(chars_per_min),
+        "est_tokens_per_min": round(tokens_per_min),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +145,8 @@ def bench_ingest(conn: psycopg.Connection, docs: list, pipeline: str) -> dict:
 
 def bench_search(conn: psycopg.Connection, queries: list, pipeline: str) -> dict:
     print(f"\n[2/3] Search latency ({len(queries)} queries × 3 modes) ...")
+    # Note: ingest is step 1 (data prep) but throughput not reported — docs/min
+    # is meaningless without controlling for doc size. Use chars/min or tokens/min.
     results: dict = {"dense": [], "hybrid": [], "mmr": []}
 
     for q in queries:
@@ -195,7 +208,6 @@ def bench_ask(conn: psycopg.Connection, queries: list, pipeline: str, n: int = 5
 
 def write_markdown(results: dict, out_path: Path) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
-    ingest = results["ingest"]
     search = results["search"]
     ask = results["ask"]
 
@@ -207,19 +219,7 @@ def write_markdown(results: dict, out_path: Path) -> None:
 
 ---
 
-## 1. Ingest Throughput
-
-| Metric | Value |
-|---|---|
-| Documents | {ingest['n_docs']} |
-| Total time | {ingest['elapsed_s']}s |
-| **Throughput** | **{ingest['docs_per_min']} docs/min** |
-
-Pipeline: ai.ingest (inline text) → pipeline-worker (async embed + chunk + pgvector store)
-
----
-
-## 2. Search Latency (p50 / p95 / p99)
+## 1. Search Latency (p50 / p95 / p99)
 
 | Mode | p50 | p95 | p99 | mean |
 |---|---|---|---|---|
@@ -232,7 +232,7 @@ Hybrid overhead vs dense = network + BM25 scan. MMR overhead = numpy cosine loop
 
 ---
 
-## 3. Ask Latency (prune strategy, top_k=3)
+## 2. Ask Latency (prune strategy, top_k=3)
 
 | Metric | Value |
 |---|---|

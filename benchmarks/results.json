@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-22T01:44:12.661117",
+  "timestamp": "2026-05-22T01:49:59.792688",
   "config": {
     "host": "localhost",
     "port": 5432,
@@ -8,32 +8,35 @@
   },
   "ingest": {
     "n_docs": 20,
-    "elapsed_s": 1.05,
-    "docs_per_min": 1141.3
+    "total_chars": 1664,
+    "est_tokens": 416,
+    "elapsed_s": 2.06,
+    "chars_per_min": 48467,
+    "est_tokens_per_min": 12117
   },
   "search": {
     "dense": {
-      "p50_ms": 227.8,
-      "p95_ms": 284.8,
-      "p99_ms": 296.6,
-      "mean_ms": 231.0
+      "p50_ms": 229.2,
+      "p95_ms": 286.7,
+      "p99_ms": 297.1,
+      "mean_ms": 233.0
     },
     "hybrid": {
-      "p50_ms": 226.4,
-      "p95_ms": 394.3,
-      "p99_ms": 439.9,
-      "mean_ms": 239.8
+      "p50_ms": 228.2,
+      "p95_ms": 315.6,
+      "p99_ms": 335.8,
+      "mean_ms": 235.6
     },
     "mmr": {
-      "p50_ms": 229.2,
-      "p95_ms": 286.9,
-      "p99_ms": 297.5,
-      "mean_ms": 233.9
+      "p50_ms": 241.5,
+      "p95_ms": 266.3,
+      "p99_ms": 270.6,
+      "mean_ms": 241.4
     }
   },
   "ask": {
-    "p50_ms": 1294.8,
-    "p95_ms": 2176.1,
-    "mean_ms": 1437.5
+    "p50_ms": 1580.9,
+    "p95_ms": 1746.4,
+    "mean_ms": 1511.5
   }
 }
