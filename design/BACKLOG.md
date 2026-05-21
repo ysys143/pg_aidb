@@ -268,14 +268,15 @@
 
 ## F. 입증 / 배포
 
-### F1. pgai 실증 비교 [NEW 2026-05-20]
-- **목표**: README의 비교 표를 실측 데이터로 뒷받침.
-- **작업**: pgai 동시 설치 → 같은 문서 (sample.pdf + 10개 추가) → 같은 질의 셋 → 측정:
-  - 인제스트 throughput (docs/min)
-  - 쿼리 latency (p50/p95/p99)
-  - 토큰 비용 / 1k 쿼리
-  - retrieval 정확도 (사람 라벨링 또는 LLM-as-judge)
-- **산출물**: `design/BENCHMARKS.md` + 차트
+### F1. 벤치마크 v1 (pg_aidb 자체) [DONE 2026-05-22]
+- **결과**: `benchmarks/run.py` 스크립트 + `design/BENCHMARKS.md` 생성.
+- **측정값** (OpenAI text-embedding-3-small, Colima/aarch64):
+  - Ingest: **1141 docs/min**
+  - Search p50: dense 228ms / hybrid 226ms / MMR 229ms (네트워크 지배)
+  - Search p95: dense 285ms / hybrid 394ms (+109ms BM25 스캔)
+  - Ask p50: **1.3s** (embed + search + LLM 전체 포함)
+- **발견**: 대부분 latency는 OpenAI embed API 네트워크 시간. 로컬 embed (Ollama)로 전환 시 p50 ~10-30ms 예상.
+- **F1 v2 (미완)**: pgai 동시 설치 + 동일 쿼리셋 비교 — 별도 작업.
 - **비용**: 0.5일 + OpenAI 호출비
 
 ### F2. 데모 영상 (5분) [NEW 2026-05-20]
