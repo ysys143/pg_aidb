@@ -29,6 +29,7 @@ struct SearchRequest<'a> {
     query: &'a str,
     collection: &'a str,
     top_k: i32,
+    filter: &'a serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +68,7 @@ pub fn call_search(
     query: &str,
     collection: &str,
     top_k: i32,
+    filter: &serde_json::Value,
 ) -> Result<Vec<ChunkResult>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -75,7 +77,7 @@ pub fn call_search(
 
     let mut req = client
         .post(format!("{base_url}/search"))
-        .json(&SearchRequest { query, collection, top_k });
+        .json(&SearchRequest { query, collection, top_k, filter });
 
     if let Some(key) = api_key {
         req = req.bearer_auth(key);

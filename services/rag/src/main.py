@@ -46,6 +46,7 @@ class SearchRequest(BaseModel):
     query: str
     collection: str = "default"
     top_k: int = 5
+    filter: dict[str, Any] = {}
 
 
 class ChunkResult(BaseModel):
@@ -65,6 +66,7 @@ class AskRequest(BaseModel):
     query: str
     collection: str = "default"
     top_k: int = 5
+    filter: dict[str, Any] = {}
 
 
 class AskResponse(BaseModel):
@@ -89,8 +91,11 @@ async def vector_search(
     query_embedding: list[float],
     collection: str,
     top_k: int,
+    filter: dict[str, Any] | None = None,
 ) -> list[ChunkResult]:
     vec = _vec_literal(query_embedding)
+    import json
+    filter_json = json.dumps(filter or {})
     async with await psycopg.AsyncConnection.connect(DATABASE_URL) as conn:
         rows = await (
             await conn.execute(
@@ -105,10 +110,11 @@ async def vector_search(
                 JOIN ai.documents d ON d.id = c.document_id
                 WHERE c.collection = %(col)s
                   AND c.embedding IS NOT NULL
+                  AND (%(filter)s::jsonb = '{}'::jsonb OR c.metadata @> %(filter)s::jsonb)
                 ORDER BY c.embedding <=> %(vec)s::vector
                 LIMIT %(k)s
                 """,
-                {"vec": vec, "col": collection, "k": top_k},
+                {"vec": vec, "col": collection, "k": top_k, "filter": filter_json},
             )
         ).fetchall()
 
@@ -156,7 +162,7 @@ async def search(req: SearchRequest) -> SearchResponse:
     t0 = time.time()
     try:
         vecs, usage = await embedder_embed_with_usage([req.query])
-        results = await vector_search(vecs[0], req.collection, req.top_k)
+        results = await vector_search(vecs[0], req.collection, req.top_k, req.filter)
     except Exception as exc:
         logger.exception("search failed", extra={"op": "search", "collection": req.collection})
         raise HTTPException(status_code=500, detail=str(exc))
@@ -177,7 +183,7 @@ async def ask(req: AskRequest) -> AskResponse:
     t0 = time.time()
     try:
         sr = await search(SearchRequest(
-            query=req.query, collection=req.collection, top_k=req.top_k
+            query=req.query, collection=req.collection, top_k=req.top_k, filter=req.filter
         ))
         chunks = sr.results
         embed_usage = sr.usage

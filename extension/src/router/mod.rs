@@ -180,6 +180,7 @@ fn search_impl(
     query: &str,
     pipeline: default!(&str, "'default'"),
     top_k: default!(i32, "0"),
+    filter: default!(pgrx::JsonB, "'{}'"),
 ) -> TableIterator<
     'static,
     (
@@ -213,6 +214,7 @@ fn search_impl(
         query,
         &pipeline_cfg.collection,
         effective_top_k,
+        &filter.0,
     )
     .unwrap_or_else(|e| error!("ai.search: {}", e));
 
@@ -392,7 +394,7 @@ extension_sql!(
         SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.ingest(text, text, text)
         SET search_path = pg_catalog, public, ai, pg_temp;
-    ALTER FUNCTION ai.search(text, text, integer)
+    ALTER FUNCTION ai.search(text, text, integer, jsonb)
         SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.ask(text, text)
         SET search_path = pg_catalog, public, ai, pg_temp;

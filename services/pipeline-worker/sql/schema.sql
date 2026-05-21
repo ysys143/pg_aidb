@@ -82,7 +82,8 @@ CREATE OR REPLACE FUNCTION ai.search_hybrid(
     query    text,
     pipeline text DEFAULT 'default',
     top_k    int  DEFAULT 5,
-    rrf_k    int  DEFAULT 60
+    rrf_k    int  DEFAULT 60,
+    filter   jsonb DEFAULT '{}'
 )
 RETURNS TABLE (
     chunk_id   text,
@@ -108,7 +109,7 @@ BEGIN
     WITH dense AS (
         SELECT s.chunk_id, s.content, s.source, s.metadata,
                row_number() OVER (ORDER BY s.similarity DESC) AS rnk
-        FROM ai.search(query, pipeline, top_k * 4) s
+        FROM ai.search(query, pipeline, top_k * 4, filter) s
     ),
     sparse AS (
         SELECT c.id::text AS chunk_id,
@@ -122,6 +123,7 @@ BEGIN
         JOIN ai.documents d ON d.id = c.document_id
         WHERE c.collection = coll
           AND c.content_tsv @@ plainto_tsquery('public.korean'::regconfig, query)
+          AND (filter = '{}'::jsonb OR c.metadata @> filter)
         LIMIT top_k * 4
     ),
     fused AS (
@@ -141,5 +143,5 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION ai.search_hybrid(text, text, int, int) IS
+COMMENT ON FUNCTION ai.search_hybrid(text, text, int, int, jsonb) IS
     'Hybrid retrieval. RRF fuses dense (ai.search) and BM25 (pg_textsearch <@>) rankings.';
