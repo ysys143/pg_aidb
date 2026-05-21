@@ -70,12 +70,12 @@
 - **파라미터**: `fetch_k=20` (후보 풀), `lambda_param=0.5` (1=순수 relevance, 0=순수 diversity).
 - **검증**: rag_mmr.sql — 3개 PostgreSQL 유사 문서 + 1개 Python 문서 → MMR top-3에 Python 문서 포함 (`mmr_includes_diverse_result=t`).
 
-### A9. 컨텍스트 윈도우 관리 [NEW 2026-05-20]
-- **문제**: 큰 문서 + top_k 늘리면 LLM 컨텍스트 초과.
-- **작업**: `/ask` 내부에 토큰 카운터 추가 → 임계 초과 시 두 가지 전략 중 택1:
-  - 단계적 요약 (map-reduce)
-  - 청크 가지치기 (max_tokens 도달까지만 prepend)
-- **이유**: 프로덕션 사용 시 거의 확실히 필요.
+### A9. 컨텍스트 윈도우 관리 [DONE 2026-05-22]
+- **결과**: `ai.ask(query, pipeline, top_k, max_context_tokens, strategy)` — `strategy='prune'`(기본) 또는 `'map_reduce'`.
+- **prune**: 청크를 쌓다가 `max_context_tokens`(기본 3000) 초과 시 중단. 토큰 추정: `words×1.3`.
+- **map_reduce**: 청크별 LLM 1-2줄 요약 → 요약본으로 최종 답변. N+1 LLM 호출.
+- **변경**: Rust `ask_impl` + `call_ask` 파라미터 추가, Python `_apply_context_strategy` 헬퍼, `AskRequest` 확장.
+- **검증**: rag_context.sql — prune/map_reduce 모두 `t`.
 
 ---
 

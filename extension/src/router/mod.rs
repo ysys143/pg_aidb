@@ -298,10 +298,15 @@ fn search_mmr_impl(
 fn ask_impl(
     query: &str,
     pipeline: default!(&str, "'default'"),
+    top_k: default!(i32, "0"),
+    max_context_tokens: default!(i32, "3000"),
+    strategy: default!(&str, "'prune'"),
 ) -> String {
     // Phase 1: resolve pipeline + endpoint (SPI)
     let pipeline_cfg = lookup_pipeline(pipeline)
         .unwrap_or_else(|| error!("ai.ask: pipeline '{}' not found in ai.pipelines", pipeline));
+
+    let effective_top_k = if top_k > 0 { top_k } else { pipeline_cfg.top_k };
 
     let (base_url, api_key_env) = lookup_endpoint(&pipeline_cfg.embed_model)
         .unwrap_or_else(|| {
@@ -319,7 +324,9 @@ fn ask_impl(
         api_key.as_deref(),
         query,
         &pipeline_cfg.collection,
-        pipeline_cfg.top_k,
+        effective_top_k,
+        max_context_tokens,
+        strategy,
     )
     .unwrap_or_else(|e| error!("ai.ask: {}", e))
 }
@@ -456,7 +463,7 @@ extension_sql!(
         SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.search_mmr(text, text, integer, integer, real, jsonb)
         SET search_path = pg_catalog, public, ai, pg_temp;
-    ALTER FUNCTION ai.ask(text, text)
+    ALTER FUNCTION ai.ask(text, text, integer, integer, text)
         SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.search_async(text, text, integer)
         SET search_path = pg_catalog, public, ai, pg_temp;

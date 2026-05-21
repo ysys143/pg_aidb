@@ -69,6 +69,8 @@ class AskRequest(BaseModel):
     collection: str = "default"
     top_k: int = 5
     filter: dict[str, Any] = {}
+    max_context_tokens: int = 3000
+    strategy: str = "prune"   # 'prune' | 'map_reduce'
 
 
 class AskResponse(BaseModel):
@@ -87,6 +89,59 @@ class EmbedRequest(BaseModel):
 
 def _vec_literal(floats: list[float]) -> str:
     return "[" + ",".join(f"{x:.8f}" for x in floats) + "]"
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: words * 1.3 (English). Good enough for pruning."""
+    return int(len(text.split()) * 1.3)
+
+
+async def _apply_context_strategy(
+    query: str,
+    chunks: list[ChunkResult],
+    max_context_tokens: int,
+    strategy: str,
+) -> tuple[list[ChunkResult], str, dict[str, Any] | None]:
+    """Apply context window management strategy.
+
+    Returns (pruned_chunks, context_string, extra_usage_or_None).
+    """
+    if strategy == "map_reduce":
+        # Summarise each chunk individually, then join summaries as context.
+        summaries: list[str] = []
+        extra_tokens = {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        for chunk in chunks:
+            msg: list[ChatCompletionMessageParam] = [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Summarise the following passage in 1-2 sentences "
+                        f"relevant to the question: '{query}'\n\n{chunk.content}"
+                    ),
+                }
+            ]
+            summary, usage = await llm_generate_with_usage(msg)
+            summaries.append(f"[Source: {chunk.source}]\n{summary}")
+            extra_tokens["total_tokens"] += usage.get("total_tokens", 0)
+            extra_tokens["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            extra_tokens["completion_tokens"] += usage.get("completion_tokens", 0)
+        context = "\n\n---\n\n".join(summaries)
+        return chunks, context, extra_tokens
+
+    # Default: 'prune' — accumulate chunks until token budget is exhausted.
+    kept: list[ChunkResult] = []
+    parts: list[str] = []
+    used = 0
+    for chunk in chunks:
+        piece = f"[Source: {chunk.source}]\n{chunk.content}"
+        tokens = _estimate_tokens(piece)
+        if used + tokens > max_context_tokens and kept:
+            break
+        kept.append(chunk)
+        parts.append(piece)
+        used += tokens
+    context = "\n\n---\n\n".join(parts)
+    return kept, context, None
 
 
 async def vector_search(
@@ -315,7 +370,10 @@ async def ask(req: AskRequest) -> AskResponse:
             usage={"embed": embed_usage},
         )
 
-    context = "\n\n---\n\n".join(f"[Source: {c.source}]\n{c.content}" for c in chunks)
+    # Apply context window strategy before building prompt.
+    chunks, context, gen_usage_extra = await _apply_context_strategy(
+        req.query, chunks, req.max_context_tokens, req.strategy
+    )
     messages: list[ChatCompletionMessageParam] = [
         {
             "role": "system",
@@ -335,6 +393,9 @@ async def ask(req: AskRequest) -> AskResponse:
     except Exception as exc:
         logger.exception("LLM call failed", extra={"op": "ask"})
         raise HTTPException(status_code=500, detail=f"LLM error: {exc}")
+    # Merge any extra LLM usage from map_reduce summarization phase.
+    if gen_usage_extra:
+        gen_usage["total_tokens"] = gen_usage.get("total_tokens", 0) + gen_usage_extra.get("total_tokens", 0)
 
     combined = {
         "embed": embed_usage,

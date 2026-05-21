@@ -88,6 +88,14 @@ run-rag-real:
 	$(WAIT_PIPELINE_WORKER)
 	$(call RUN_PSQL,rag_e2e.sql)
 
+run-rag-context-real:
+	@test -n "$(OPENAI_API_KEY)" || (echo "ERROR: OPENAI_API_KEY not set — add it to .env"; exit 1)
+	docker compose up -d --force-recreate pg builder
+	$(BOOTSTRAP_PG)
+	docker compose up -d --force-recreate pipeline-worker rag
+	$(WAIT_PIPELINE_WORKER)
+	$(call RUN_PSQL,rag_context.sql)
+
 run-rag-mmr-real:
 	@test -n "$(OPENAI_API_KEY)" || (echo "ERROR: OPENAI_API_KEY not set — add it to .env"; exit 1)
 	docker compose up -d --force-recreate pg builder

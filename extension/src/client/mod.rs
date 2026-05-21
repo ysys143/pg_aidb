@@ -56,6 +56,8 @@ struct AskRequest<'a> {
     query: &'a str,
     collection: &'a str,
     top_k: i32,
+    max_context_tokens: i32,
+    strategy: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +146,8 @@ pub fn call_ask(
     query: &str,
     collection: &str,
     top_k: i32,
+    max_context_tokens: i32,
+    strategy: &str,
 ) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -152,7 +156,7 @@ pub fn call_ask(
 
     let mut req = client
         .post(format!("{base_url}/ask"))
-        .json(&AskRequest { query, collection, top_k });
+        .json(&AskRequest { query, collection, top_k, max_context_tokens, strategy });
 
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
