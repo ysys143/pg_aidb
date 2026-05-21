@@ -14,6 +14,8 @@ import logging
 import time
 from typing import Any
 
+import numpy as np
+
 # Strip empty BASE_URL env vars — SDKs sometimes read them directly,
 # and "" is not the same as unset (it causes "missing protocol" errors).
 for _var in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"):
@@ -130,6 +132,94 @@ async def vector_search(
     ]
 
 
+class SearchMmrRequest(BaseModel):
+    query: str
+    collection: str = "default"
+    top_k: int = 5
+    fetch_k: int = 20       # candidate pool before MMR re-ranking
+    lambda_param: float = 0.5   # 1.0 = pure relevance, 0.0 = pure diversity
+    filter: dict[str, Any] = {}
+
+
+async def vector_search_with_embeddings(
+    query_embedding: list[float],
+    collection: str,
+    fetch_k: int,
+    filter: dict[str, Any] | None = None,
+) -> list[tuple[ChunkResult, list[float]]]:
+    """Like vector_search but also returns raw embedding vectors for MMR."""
+    import json
+    vec = _vec_literal(query_embedding)
+    filter_json = json.dumps(filter or {})
+    async with await psycopg.AsyncConnection.connect(DATABASE_URL) as conn:
+        rows = await (
+            await conn.execute(
+                """
+                SELECT
+                    c.id::text,
+                    c.content,
+                    1 - (c.embedding <=> %(vec)s::vector) AS similarity,
+                    d.source,
+                    c.metadata,
+                    c.embedding::text
+                FROM ai.chunks c
+                JOIN ai.documents d ON d.id = c.document_id
+                WHERE c.collection = %(col)s
+                  AND c.embedding IS NOT NULL
+                  AND (%(filter)s::jsonb = '{}'::jsonb OR c.metadata @> %(filter)s::jsonb)
+                ORDER BY c.embedding <=> %(vec)s::vector
+                LIMIT %(k)s
+                """,
+                {"vec": vec, "col": collection, "k": fetch_k, "filter": filter_json},
+            )
+        ).fetchall()
+
+    results = []
+    for row in rows:
+        chunk = ChunkResult(
+            chunk_id=row[0], content=row[1], similarity=float(row[2]),
+            source=row[3], metadata=row[4] or {},
+        )
+        emb = [float(x) for x in row[5][1:-1].split(",")]
+        results.append((chunk, emb))
+    return results
+
+
+def _mmr_select(
+    query_embedding: list[float],
+    candidates: list[tuple[ChunkResult, list[float]]],
+    top_k: int,
+    lambda_param: float,
+) -> list[ChunkResult]:
+    """Greedy MMR: maximise λ·sim(d,q) - (1-λ)·max_j sim(d,dj)."""
+    if not candidates:
+        return []
+    q = np.array(query_embedding, dtype=float)
+    embs = [np.array(e, dtype=float) for _, e in candidates]
+    chunks = [c for c, _ in candidates]
+
+    def cos(a: np.ndarray, b: np.ndarray) -> float:
+        denom = (np.linalg.norm(a) * np.linalg.norm(b)) or 1.0
+        return float(np.dot(a, b) / denom)
+
+    selected: list[int] = []
+    while len(selected) < top_k and len(selected) < len(candidates):
+        best_i, best_score = -1, -float("inf")
+        for i in range(len(candidates)):
+            if i in selected:
+                continue
+            rel = cos(embs[i], q)
+            red = max((cos(embs[i], embs[j]) for j in selected), default=0.0)
+            score = lambda_param * rel - (1 - lambda_param) * red
+            if score > best_score:
+                best_score, best_i = score, i
+        if best_i == -1:
+            break
+        selected.append(best_i)
+
+    return [chunks[i] for i in selected]
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -137,6 +227,32 @@ async def vector_search(
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "rag"}
+
+
+@app.post("/search_mmr", response_model=SearchResponse)
+async def search_mmr(req: SearchMmrRequest) -> SearchResponse:
+    """MMR retrieval — returns top_k diverse chunks via Maximal Marginal Relevance."""
+    t0 = time.time()
+    try:
+        vecs, usage = await embedder_embed_with_usage([req.query])
+        candidates = await vector_search_with_embeddings(
+            vecs[0], req.collection, req.fetch_k, req.filter
+        )
+        results = _mmr_select(vecs[0], candidates, req.top_k, req.lambda_param)
+    except Exception as exc:
+        logger.exception("search_mmr failed", extra={"op": "search_mmr"})
+        raise HTTPException(status_code=500, detail=str(exc))
+    logger.info("search_mmr done", extra={
+        "op": "search_mmr",
+        "collection": req.collection,
+        "top_k": req.top_k,
+        "fetch_k": req.fetch_k,
+        "lambda": req.lambda_param,
+        "n_results": len(results),
+        "duration_ms": int((time.time() - t0) * 1000),
+        "usage": usage,
+    })
+    return SearchResponse(results=results, usage=usage)
 
 
 @app.post("/v1/embeddings")

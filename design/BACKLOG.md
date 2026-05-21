@@ -57,10 +57,12 @@
 - **검증**: rag_filter.sql E2E — category=database/python 필터 3개 assertion 통과.
 - **부가 발견**: 벡터 검색은 threshold 없어서 "0개 반환" 단언 불가 — 필터 정확성은 "반환된 결과가 모두 기대한 category인지"로 검증해야 함.
 
-### A7. 하이브리드 검색 (벡터 + tsvector) [NEW 2026-05-20]
-- **동기**: 의미 검색만으로는 정확한 키워드 일치 (사람 이름, 코드, 숫자) 놓침.
-- **작업**: `ai.chunks`에 `content_tsv tsvector` 컬럼 + GIN 인덱스. `ai.search()`가 RRF(reciprocal rank fusion) 또는 가중 합으로 두 결과 머지.
-- **이유**: RAG 정확도 가장 흔한 즉시 개선책. reranker 블록 상황에서 대안.
+### A7. 하이브리드 검색 (BM25 + dense + RRF) [DONE 2026-05-20]
+- **결과**: `ai.search_hybrid(query, pipeline, top_k, rrf_k, filter)` — textsearch_ko(MeCab) + pg_textsearch(BM25 bm25 인덱스) + pgvector HNSW를 RRF로 결합.
+- **구현**: `ai.chunks.content_tsv tsvector GENERATED` + GIN 인덱스 + `ai_chunks_bm25_idx`. `ai.search_hybrid`는 순수 PL/pgSQL (schema.sql).
+- **인프라**: textsearch_ko + pg_textsearch를 deploy/docker/extensions에 vendor, Dockerfile.pg에서 MeCab + USE_PGXS=1 빌드. `shared_preload_libraries=pg_textsearch` (docker-compose command).
+- **검증**: rag_hybrid.sql E2E 3개 assertion 통과 (content_tsv 컬럼, function 존재, 결과 반환).
+- **부가 발견**: pg_textsearch `<@>` 연산자는 window함수 ORDER BY에서 planner rewrite 안 됨 → 명시적 `to_bm25query(query, 'ai_chunks_bm25_idx')` 필요. pg named volume이 이미지 재빌드 후에도 옛 .so 잔류 → `docker compose down -v` 필수.
 
 ### A8. 결과 다양화 (MMR) [NEW 2026-05-20]
 - **현재**: top_k가 비슷한 청크로 채워짐 (semantic similarity가 의미적 중복 선호).

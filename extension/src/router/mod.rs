@@ -5,7 +5,7 @@
 use pgrx::prelude::*;
 use pgrx::iter::TableIterator;
 use crate::{
-    client::{call_ask, call_embeddings, call_search},
+    client::{call_ask, call_embeddings, call_search, call_search_mmr},
     registry::{lookup_endpoint, lookup_pipeline},
 };
 
@@ -227,6 +227,64 @@ fn search_impl(
 }
 
 // ----------------------------------------------------------------
+// ai.search_mmr — MMR diversity re-ranking (Maximal Marginal Relevance)
+// ----------------------------------------------------------------
+#[pg_extern(
+    name = "search_mmr",
+    schema = "ai",
+    volatile,
+    parallel_unsafe,
+    security_definer
+)]
+fn search_mmr_impl(
+    query: &str,
+    pipeline: default!(&str, "'default'"),
+    top_k: default!(i32, "5"),
+    fetch_k: default!(i32, "20"),
+    lambda_param: default!(f32, "0.5"),
+    filter: default!(pgrx::JsonB, "'{}'"),
+) -> TableIterator<
+    'static,
+    (
+        name!(chunk_id, String),
+        name!(content, String),
+        name!(similarity, f32),
+        name!(source, String),
+        name!(metadata, pgrx::JsonB),
+    ),
+> {
+    let pipeline_cfg = lookup_pipeline(pipeline)
+        .unwrap_or_else(|| error!("ai.search_mmr: pipeline '{}' not found", pipeline));
+
+    let effective_top_k = if top_k > 0 { top_k } else { pipeline_cfg.top_k };
+    let effective_fetch_k = if fetch_k > effective_top_k { fetch_k } else { effective_top_k * 4 };
+
+    let (base_url, api_key_env) = lookup_endpoint(&pipeline_cfg.embed_model)
+        .unwrap_or_else(|| error!("ai.search_mmr: embed_model '{}' not found", pipeline_cfg.embed_model));
+
+    let api_key = api_key_env.and_then(|k| std::env::var(k).ok());
+
+    let results = call_search_mmr(
+        &base_url,
+        api_key.as_deref(),
+        query,
+        &pipeline_cfg.collection,
+        effective_top_k,
+        effective_fetch_k,
+        lambda_param,
+        &filter.0,
+    )
+    .unwrap_or_else(|e| error!("ai.search_mmr: {}", e));
+
+    let rows: Vec<(String, String, f32, String, pgrx::JsonB)> = results
+        .into_iter()
+        .map(|r| (r.chunk_id, r.content, r.similarity, r.source, pgrx::JsonB(r.metadata)))
+        .collect();
+
+    TableIterator::new(rows)
+}
+
+// ----------------------------------------------------------------
 // ai.ask — retrieval + LLM generation (like aidb.retrieve_and_generate)
 // Returns LLM-generated answer grounded in retrieved chunks.
 // ----------------------------------------------------------------
@@ -396,6 +454,8 @@ extension_sql!(
         SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.search(text, text, integer, jsonb)
         SET search_path = pg_catalog, public, ai, pg_temp;
+    ALTER FUNCTION ai.search_mmr(text, text, integer, integer, real, jsonb)
+        SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.ask(text, text)
         SET search_path = pg_catalog, public, ai, pg_temp;
     ALTER FUNCTION ai.search_async(text, text, integer)
@@ -410,6 +470,7 @@ extension_sql!(
         create_pipeline_impl,
         ingest_impl,
         search_impl,
+        search_mmr_impl,
         ask_impl,
         search_async_impl,
         ask_async_impl,

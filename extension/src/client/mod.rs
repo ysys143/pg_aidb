@@ -42,6 +42,16 @@ pub struct ChunkResult {
 }
 
 #[derive(Serialize)]
+struct SearchMmrRequest<'a> {
+    query: &'a str,
+    collection: &'a str,
+    top_k: i32,
+    fetch_k: i32,
+    lambda_param: f32,
+    filter: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
 struct AskRequest<'a> {
     query: &'a str,
     collection: &'a str,
@@ -78,6 +88,40 @@ pub fn call_search(
     let mut req = client
         .post(format!("{base_url}/search"))
         .json(&SearchRequest { query, collection, top_k, filter });
+
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp: SearchResponse = req
+        .send()
+        .map_err(|e| format!("http send: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("http status: {e}"))?
+        .json()
+        .map_err(|e| format!("json decode: {e}"))?;
+
+    Ok(resp.results)
+}
+
+pub fn call_search_mmr(
+    base_url: &str,
+    api_key: Option<&str>,
+    query: &str,
+    collection: &str,
+    top_k: i32,
+    fetch_k: i32,
+    lambda_param: f32,
+    filter: &serde_json::Value,
+) -> Result<Vec<ChunkResult>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("client build: {e}"))?;
+
+    let mut req = client
+        .post(format!("{base_url}/search_mmr"))
+        .json(&SearchMmrRequest { query, collection, top_k, fetch_k, lambda_param, filter });
 
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
