@@ -1,13 +1,15 @@
 # pg_aidb
 
+English | <a href="README.ko.md">한국어</a>
+
 [![CI](https://github.com/ysys143/pg_aidb/actions/workflows/ci.yml/badge.svg)](https://github.com/ysys143/pg_aidb/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ysys143/pg_aidb)](https://github.com/ysys143/pg_aidb/releases)
 
-**PostgreSQL로 RAG 애플리케이션을 구동하세요.**
+**Power your RAG applications with PostgreSQL.**
 
-[설치](#설치) · [사용법](#사용법) · [기능](#주요-기능) · [작동 방식](#작동-방식) · [문서](#문서)
+[Install](#install) · [Usage](#usage) · [Features](#features) · [How it works](#how-it-works) · [Docs](#docs)
 
-임베딩 · 벡터 검색 · RAG를 SQL 함수로 노출하는 in-DB AI 플랫폼. 무거운 컴퓨트(파싱 · 청킹 · 임베딩 · LLM)는 외부 마이크로서비스로 분리해 DB를 블로킹하지 않습니다.
+An in-DB AI platform that exposes embedding, vector search, and RAG as SQL functions. Heavy compute (parsing, chunking, embedding, LLM calls) runs in external microservices, so it never blocks the database.
 
 ```sql
 SELECT ai.create_pipeline('docs', 'my-collection', 'default', 'default-llm', '{}');
@@ -15,179 +17,224 @@ SELECT ai.ingest('/data/paper.pdf', '', 'docs');
 SELECT ai.ask('What is PostgreSQL?', 'docs');
 ```
 
-> 개발 단계입니다. 아래 기능은 모두 동작·테스트되며, 향후 방향은 [`design/BACKLOG.md`](design/BACKLOG.md)에 있습니다.
+> Under active development. The features below all work and are tested; the roadmap lives in [`design/BACKLOG.md`](design/BACKLOG.md).
 
 ---
 
-## 왜 DB 안에서 AI를?
+## Why AI inside the database?
 
-"임베딩도, 검색도, 생성도 SQL 한 줄로" — 매력적입니다. 그런데 PostgreSQL은 process-per-connection 모델입니다. 커넥션 하나가 곧 OS 프로세스 하나이고, 그 프로세스가 수십 초짜리 LLM 호출에 묶이면 커넥션 풀 전체가 말라붙습니다.
+"Embed, search, and generate in one line of SQL" is appealing. But PostgreSQL uses a process-per-connection model: one connection is one OS process, and once that process is stuck in a multi-second LLM call, the whole connection pool dries up.
 
-pg_aidb는 이 긴장을 정면으로 다룹니다. SQL 인터페이스의 편의는 가져가되, 무거운 컴퓨트는 DB 밖으로 밀어내고 비동기로 노출합니다. 무엇을 DB 안에 두고 무엇을 밖으로 빼야 하는가 — 그 경계를 어떻게 그었는지는 [설계 철학](design/DESIGN_PHILOSOPHY.md) 문서에서 다룹니다.
-
----
-
-## 주요 기능
-
-- **문서 인제스트 파이프라인.** PDF · DOCX · HWP를 외부 워커로 보내 파싱(opendataloader) → 청킹 → 임베딩 → pgvector 저장. 청킹은 `config.chunking.method`로 semantic / fixed / recursive / paragraph 선택.
-
-- **여러 검색 모드.** dense(pgvector HNSW), hybrid(BM25 + dense + RRF), MMR diversity 재정렬, 메타데이터 필터 — `ai.search`, `ai.search_mmr`.
-
-- **SQL 한 줄 RAG.** `ai.ask`가 검색 + 컨텍스트 조립 + LLM 생성을 한 번에 처리. 컨텍스트 윈도우 확장 지원.
-
-- **Dual-mode API.** 가벼운 호출은 동기, 무거운 호출은 비동기(`*_async`). UUID 반환 후 `ai.results` 폴링으로 커넥션이 AI I/O에 묶이지 않음.
-
-- **멀티 프로바이더.** 임베딩·LLM 백엔드를 `services/shared/`의 추상화 한 곳에서 교체. API 키는 컨테이너 env에만 존재(DB에는 변수 이름만).
-
-- **안정된 계약 표면.** 내부 `ai.*` 테이블을 리팩토링해도 외부 컨슈머는 `platform_ai.*_v1` 뷰만 참조(민감 컬럼 은닉).
-
-- **운영 기본기.** JSON 로그 + `platform_ai.usage_v1` 뷰로 비용·지연 집계, `SECURITY DEFINER` 보안 리뷰, `pg_dump`/`pg_restore` 검증, GitHub Actions CI.
+pg_aidb confronts this tension head-on. It keeps the convenience of the SQL interface but pushes heavy compute out of the database and exposes it asynchronously. What belongs inside the database and what must stay outside — and how that line was drawn — is covered in [DESIGN_PHILOSOPHY.md](design/DESIGN_PHILOSOPHY.md).
 
 ---
 
-## 설치
+## Features
 
-### 사전 준비
+- **Document ingestion pipeline.** Sends PDF · DOCX · HWP to an external worker for parsing (opendataloader) → chunking → embedding → pgvector storage. Chunking method is selectable via `config.chunking.method`: semantic / fixed / recursive / paragraph.
 
-- Docker (Colima 또는 Docker Desktop)
-- OpenAI API 키 (없으면 비용 0의 mock 모드 사용)
-- PostgreSQL 17 · pgvector는 제공되는 컨테이너 이미지에 포함 (수동 설치 시 PostgreSQL 13+ 및 pgvector 필요)
+- **Multiple search modes.** dense (pgvector HNSW), hybrid (BM25 + dense + RRF), MMR diversity reranking, and metadata filtering — `ai.search`, `ai.search_mmr`.
 
-### 실행
+- **RAG in one line of SQL.** `ai.ask` handles search + context assembly + LLM generation in a single call, with context-window expansion.
+
+- **Dual-mode API.** Light calls run synchronously; heavy calls run asynchronously (`*_async`), returning a UUID you poll via `ai.results` so connections are never tied up by AI I/O.
+
+- **Multi-provider.** Swap embedding and LLM backends in one place — the abstraction under `services/shared/`. API keys live only in the container env (the DB stores just the variable name).
+
+- **Stable contract surface.** Internal `ai.*` tables can be refactored freely; external consumers only read the `platform_ai.*_v1` views (sensitive columns hidden).
+
+- **Operational basics.** Cost/latency aggregation via JSON logs and the `platform_ai.usage_v1` view, `SECURITY DEFINER` security review, `pg_dump`/`pg_restore` verification, and GitHub Actions CI.
+
+---
+
+## Core concepts
+
+Everything lives under two schemas:
+
+- **`ai.*` — the operational schema.** Holds the registry and runtime state: `ai.endpoints` (provider base URLs), `ai.models` (named embedding/LLM models bound to an endpoint), `ai.pipelines` (a named bundle of embed model + LLM + chunking config), `ai.chunks` (ingested text plus its pgvector embedding and metadata), and `ai.results` (the async job/result queue). All callable functions live here too.
+- **`platform_ai.*_v1` — the stable contract.** Read-only views over the operational tables, with sensitive columns (such as API-key env names) hidden. Build your application against these views; the underlying `ai.*` tables can be refactored without breaking consumers.
+
+The registry forms a chain: an **endpoint** (where to call) → a **model** (what to call — an embedding or chat model) → a **pipeline** (how to process: which embed model, which LLM, and the chunking config). You name a pipeline once, and every `ingest` / `search` / `ask` call simply references that name.
+
+Asynchronous calls return a UUID and insert a row into `ai.results` with `status = 'pending'`. The external worker fills in `data` (or `error_msg`) and flips `status` to `done`/`error`. A row left pending past `pending_timeout_at` (default 5 minutes) is reaped to `error`.
+
+---
+
+## Install
+
+### Prerequisites
+
+- Docker (Colima or Docker Desktop)
+- An OpenAI API key (or use the zero-cost mock mode)
+- PostgreSQL 17 and pgvector ship in the provided container image (a manual install needs PostgreSQL 13+ and pgvector)
+
+### Run
 
 ```bash
 cp .env.example .env
-# OPENAI_API_KEY=sk-... 채우기
+# fill in OPENAI_API_KEY=sk-...
 
 cd extension && make run-rag-real
-# 한 줄로: 컨테이너 기동 → extension 설치 → 인제스트 → 검색 → 답변 → 정리
+# one command: start containers → install extension → ingest → search → answer → clean up
 ```
 
-비용 없이 mock으로 확인:
+Verify with no cost using mock:
 
 ```bash
 cd extension && make run-rag-mock
 ```
 
-검색 모드별 시연:
+Demos per search mode:
 
 ```bash
 make run-rag-hybrid-real    # BM25 + dense + RRF
-make run-rag-mmr-real       # MMR diversity 재정렬
-make run-rag-filter-real    # 메타데이터 필터
-make run-rag-async-real     # NOTIFY + ai.results 폴링
+make run-rag-mmr-real       # MMR diversity reranking
+make run-rag-filter-real    # metadata filtering
+make run-rag-async-real     # NOTIFY + ai.results polling
 ```
 
 ---
 
-## 사용법
+## Usage
 
-워크플로는 네 단계입니다 — 파이프라인 정의, 문서 인제스트, 검색, 질의응답.
+### Function reference
 
-**1. 파이프라인 정의.** 임베딩 모델 · LLM · 청킹 방식을 묶어 이름을 붙입니다. 이후 모든 호출이 이 이름을 참조합니다.
+| Function | Parameters (with defaults) | Returns |
+|---|---|---|
+| `ai.create_pipeline` | `name, collection='default', embed_model='default', llm_model='default-llm', config jsonb='{}'` | `void` |
+| `ai.ingest` | `source, content='', pipeline='default'` | `uuid` |
+| `ai.search` | `query, pipeline='default', top_k=0, filter jsonb='{}'` | `table(chunk_id, content, similarity, source, metadata)` |
+| `ai.search_mmr` | `query, pipeline='default', top_k=5, fetch_k=20, lambda_param=0.5, filter jsonb='{}'` | same as `ai.search` |
+| `ai.ask` | `query, pipeline='default', top_k=0, max_context_tokens=3000, strategy='prune'` | `text` |
+| `ai.embed_raw` | `input, model='default'` | `float4[]` |
+| `ai.search_async` | `query, pipeline='default', top_k=0` | `uuid` |
+| `ai.ask_async` | `query, pipeline='default'` | `uuid` |
+| `ai.embed_async` | `input, model='default'` | `uuid` |
+
+The workflow has four steps — define a pipeline, ingest documents, search, and ask.
+
+**1. Define a pipeline.** Bundle an embedding model, an LLM, and a chunking config under a name. `config` is a JSONB blob carrying chunking/retrieval settings (for example `{"chunking": {"method": "semantic"}, "top_k": 5}`). The call is idempotent — it upserts on `name`.
 
 ```sql
-SELECT ai.create_pipeline('docs', 'my-collection', 'default', 'default-llm', '{}');
+SELECT ai.create_pipeline(
+  'docs',                                  -- pipeline name
+  'my-collection',                         -- logical collection
+  'default',                               -- embedding model (from ai.models)
+  'default-llm',                           -- LLM model
+  '{"chunking": {"method": "semantic"}}'   -- config
+);
 ```
 
-**2. 문서 인제스트.** 파일 경로를 넘기면 외부 워커가 파싱 · 청킹 · 임베딩 후 pgvector에 저장합니다. 비동기로 동작하며 추적용 UUID를 반환합니다.
+**2. Ingest documents.** Pass a file path in `source` (the worker reads and parses it) or raw text in `content`. The call runs asynchronously and returns a tracking UUID; the worker parses, chunks, embeds, and stores into `ai.chunks`.
 
 ```sql
-SELECT ai.ingest('/data/paper.pdf', '', 'docs');
+SELECT ai.ingest('/data/paper.pdf', '', 'docs');      -- from a file
+SELECT ai.ingest('', 'raw text to embed', 'docs');    -- from inline text
 ```
 
-**3. 검색.** 질의 텍스트를 임베딩해 유사 청크를 반환합니다. 다양성이 필요하면 `ai.search_mmr`를 사용합니다.
+**3. Search.** Embeds the query and returns the most similar chunks as `(chunk_id, content, similarity, source, metadata)`. `top_k=0` falls back to the pipeline's configured `top_k`. The `filter` argument restricts results by JSONB containment (`metadata @> filter`).
 
 ```sql
 SELECT * FROM ai.search('vector index internals', 'docs', 5);
-SELECT * FROM ai.search_mmr('vector index internals', 'docs', 5);
+
+-- only chunks whose metadata contains {"source": "paper.pdf"}
+SELECT * FROM ai.search('vector index internals', 'docs', 5, '{"source": "paper.pdf"}');
 ```
 
-**4. 질의응답(RAG).** 검색 · 컨텍스트 조립 · LLM 생성을 한 번에 처리합니다.
+For diversity (avoiding near-duplicate chunks), `ai.search_mmr` reranks `fetch_k` candidates down to `top_k` by Maximal Marginal Relevance. `lambda_param` trades off relevance (`1.0`) against diversity (`0.0`).
+
+```sql
+SELECT * FROM ai.search_mmr('vector index internals', 'docs', 5, 20, 0.5);
+```
+
+**4. Ask (RAG).** Search + context assembly + LLM generation in one call, returning the answer text. `max_context_tokens` caps the assembled context; `strategy` controls how context is trimmed when chunks exceed that budget (`'prune'`).
 
 ```sql
 SELECT ai.ask('What is an HNSW index?', 'docs');
+SELECT ai.ask('What is an HNSW index?', 'docs', 8, 4000, 'prune');
 ```
 
-**프로덕션 — 비동기 폴링.** 무거운 호출은 `*_async` 변형이 UUID를 즉시 반환하고, 결과는 `ai.results`에서 폴링합니다. 커넥션이 LLM 호출에 묶이지 않습니다.
+**Production — async polling.** Heavy calls have `*_async` variants that return a UUID immediately, so the connection is never tied up by the LLM call. Poll `ai.results` by `request_id`:
 
 ```sql
-SELECT ai.ask_async('Explain MVCC', 'docs');
-SELECT status, result FROM ai.results WHERE id = '...';
+SELECT ai.ask_async('Explain MVCC', 'docs');   -- returns a request UUID
+
+SELECT status, data, error_msg, finished_at
+FROM ai.results
+WHERE request_id = '...'::uuid;
+-- status: 'pending' → 'done' (data filled) or 'error' (error_msg filled)
 ```
 
-전체 시나리오는 [`design/PLAYBOOK.md`](design/PLAYBOOK.md), 개발 환경 셋업은 [`design/DEV_GUIDE.md`](design/DEV_GUIDE.md)를 참고하세요.
+For full scenarios see [`design/PLAYBOOK.md`](design/PLAYBOOK.md), and for dev setup see [`design/DEV_GUIDE.md`](design/DEV_GUIDE.md).
 
 ---
 
-## 작동 방식
+## How it works
 
-extension은 큐 · 결과 영속 · SQL 표면만 맡고, 무거운 컴퓨트는 전부 외부 Python 서비스가 담당합니다. 가벼운 호출만 동기로, 무거운 호출은 비동기(NOTIFY + `ai.results` 폴링)로 노출합니다.
+The extension handles only the queue, result persistence, and the SQL surface; all heavy compute runs in external Python services. Light calls are synchronous; heavy calls are asynchronous (NOTIFY + `ai.results` polling).
 
-```
-                  ┌─ ai.embed_raw / ai.search / ai.ask   (sync, blocking)
-SQL ──── pg_aidb ─┤
-                  └─ ai.ingest / *_async                  (async, NOTIFY)
-                                  │
-                                  ▼
-                          ai._outbox  ◄── pipeline-worker (Python, LISTEN)
-                                  │       ├─ opendataloader (PDF/DOCX/HWP)
-                                  │       ├─ semantic chunker (no langchain)
-                                  │       └─ OpenAI embed → pgvector store
-                                  ▼
-                          ai.results ◄── rag service (Python, HTTP)
-                                          ├─ POST /search  → pgvector cosine
-                                          └─ POST /ask     → GPT-4o-mini
+```mermaid
+flowchart TD
+    SQL([SQL client])
+    SQL -- "sync · ai.embed_raw / ai.search / ai.ask" --> EXT[pg_aidb extension]
+    SQL -- "async · ai.ingest / *_async · NOTIFY" --> EXT
 
-contract surface: platform_ai.{endpoints,models,pipelines,results,usage}_v1
+    EXT --> OUTBOX[(ai._outbox)]
+    OUTBOX -- LISTEN --> WORKER[pipeline-worker · Python]
+    WORKER -- "opendataloader → chunker → embed → pgvector store" --> RESULTS[(ai.results)]
+
+    EXT -- HTTP --> RAG[rag service · Python]
+    RAG -- "POST /search → pgvector cosine<br/>POST /ask → GPT-4o-mini" --> RESULTS
+
+    EXT -. contract surface .-> VIEWS["platform_ai.*_v1 views"]
 ```
 
-| 컴포넌트 | 언어 | 책임 |
+| Component | Language | Responsibility |
 |---|---|---|
-| `extension/` | Rust (pgrx 0.18) | SQL 인터페이스, HTTP 라우팅. 비즈니스 로직 없음. |
-| `services/pipeline-worker/` | Python (FastAPI) | LISTEN → 파싱 → 청킹 → 임베딩 → 저장 |
+| `extension/` | Rust (pgrx 0.18) | SQL interface and HTTP routing. No business logic. |
+| `services/pipeline-worker/` | Python (FastAPI) | LISTEN → parse → chunk → embed → store |
 | `services/rag/` | Python (FastAPI) | `/search` `/ask` `/v1/embeddings` HTTP API |
-| `services/shared/` | Python | embedder · llm · chunker · structured_log 추상화 |
+| `services/shared/` | Python | embedder · llm · chunker · structured_log abstractions |
 
-설계 근거는 [`design/DESIGN_PHILOSOPHY.md`](design/DESIGN_PHILOSOPHY.md)와 [`design/DECISIONS.md`](design/DECISIONS.md)(ADR-001~006)에 있습니다.
+The rationale lives in [`design/DESIGN_PHILOSOPHY.md`](design/DESIGN_PHILOSOPHY.md) and [`design/DECISIONS.md`](design/DECISIONS.md) (ADR-001~006).
 
 ---
 
-## 성능
+## Performance
 
-로컬 Docker(Colima/aarch64), PostgreSQL 17 · pgvector 0.8 기준 검색 지연(query 임베딩 API 호출 포함):
+Search latency on local Docker (Colima/aarch64), PostgreSQL 17 · pgvector 0.8 (includes the query embedding API call):
 
-| 모드 | p50 | p95 | p99 |
+| Mode | p50 | p95 | p99 |
 |---|---|---|---|
 | Dense (pgvector HNSW) | 229ms | 287ms | 297ms |
 | Hybrid (BM25 + dense + RRF) | 228ms | 316ms | 336ms |
 | MMR (fetch_k=20, λ=0.5) | 242ms | 266ms | 271ms |
 
-측정 방법과 전체 수치는 [`design/BENCHMARKS.md`](design/BENCHMARKS.md)에 있습니다.
+Methodology and full numbers are in [`design/BENCHMARKS.md`](design/BENCHMARKS.md).
 
 ---
 
-## 문서
+## Docs
 
-| 파일 | 내용 |
+| File | Contents |
 |---|---|
-| [design/ARCHITECTURE.md](design/ARCHITECTURE.md) | 컴포넌트 구성과 데이터 흐름 |
-| [design/DESIGN_PHILOSOPHY.md](design/DESIGN_PHILOSOPHY.md) | 설계의 근본 제약과 결정 배경 |
-| [design/DECISIONS.md](design/DECISIONS.md) | 주요 결정 기록 (ADR-001~006) |
-| [design/HANDOFF.md](design/HANDOFF.md) | pgrx 0.18 구현 패턴과 함정 |
-| [design/PLAYBOOK.md](design/PLAYBOOK.md) | 수동 테스트 시나리오 |
-| [design/DEV_GUIDE.md](design/DEV_GUIDE.md) | 개발 환경 셋업과 함정 모음 |
-| [design/SECURITY.md](design/SECURITY.md) | 위협 모델과 ACL 권장 사항 |
-| [design/BENCHMARKS.md](design/BENCHMARKS.md) | 성능 측정 결과 |
-| [design/GPU_STRATEGY.md](design/GPU_STRATEGY.md) | GPU 가속 로드맵 (pg_cuvs 연동) |
-| [design/BACKLOG.md](design/BACKLOG.md) | 로드맵과 진행 현황 |
+| [design/ARCHITECTURE.md](design/ARCHITECTURE.md) | Component layout and data flow |
+| [design/DESIGN_PHILOSOPHY.md](design/DESIGN_PHILOSOPHY.md) | Core constraints and the reasoning behind decisions |
+| [design/DECISIONS.md](design/DECISIONS.md) | Decision records (ADR-001~006) |
+| [design/HANDOFF.md](design/HANDOFF.md) | pgrx 0.18 implementation patterns and pitfalls |
+| [design/PLAYBOOK.md](design/PLAYBOOK.md) | Manual test scenarios |
+| [design/DEV_GUIDE.md](design/DEV_GUIDE.md) | Dev environment setup and common pitfalls |
+| [design/SECURITY.md](design/SECURITY.md) | Threat model and ACL recommendations |
+| [design/BENCHMARKS.md](design/BENCHMARKS.md) | Performance measurements |
+| [design/GPU_STRATEGY.md](design/GPU_STRATEGY.md) | GPU acceleration roadmap (pg_cuvs integration) |
+| [design/BACKLOG.md](design/BACKLOG.md) | Roadmap and progress |
 
 ---
 
-## 기여
+## Contributing
 
-이슈와 PR을 환영합니다. [`design/DEV_GUIDE.md`](design/DEV_GUIDE.md)의 개발 환경 셋업과 함정 모음을 먼저 읽어 주세요.
+Issues and PRs are welcome. Please read the dev environment setup and common pitfalls in [`design/DEV_GUIDE.md`](design/DEV_GUIDE.md) first.
 
-## 라이선스
+## License
 
 [PostgreSQL License](LICENSE).
