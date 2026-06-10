@@ -555,3 +555,77 @@ PL/pgSQL UDF만으로 갈 경우 잃는 것:
 - GUC 변수 (config 테이블로 대체 가능하나 우아하지 않음)
 - Background Worker
 - C 레벨 hook 가능성
+
+---
+
+## ADR-007: ingest/query 분리 시 공유 불변식과 단일 레지스트리
+
+### 배경
+
+B3(services 독립성 — RDB/VectorDB/Queue 추상화)을 추진하면 `ingest`(쓰기 경로)와
+`search`/`ask`(읽기 경로)를 별도 서비스로 떼어내 독립 배포·스케일할 수 있게 된다.
+이때 "두 경로를 아예 별개로 가도 되는가"라는 질문이 생긴다.
+
+### 쟁점
+
+`ingest`와 `search`/`ask`는 **독립적으로 호출 가능**하지만
+**독립적으로 일관적이지는 않다**. 둘은 코드가 아니라 **데이터 계약(불변식)으로 결합**되어
+있다. query가 옳게 동작하려면 ingest가 저장할 때와 동일한 임베딩 공간을 써야 한다.
+
+이 불변식이 어긋나면 **에러 없이 조용히 엉뚱한 결과를 반환한다**(silent corruption).
+이것이 "둘을 별개로 가면 상태가 크게 꼬인다"의 실체다.
+
+### 공유 불변식
+
+| 항목 | 양쪽 일치 필요? | 비고 |
+|------|----------------|------|
+| 임베딩 모델 | 필수 | query 벡터와 저장 벡터가 같은 모델이어야 유사도가 의미를 가짐 |
+| 차원 (dimension) | 필수 | 불일치 시 연산 불가/무의미 |
+| 거리 메트릭 | 필수 | cosine vs L2 |
+| 컬렉션/파이프라인 정의 | 필수 | 검색 대상의 범위 |
+| 청킹 방식 | 불필요 | write 시점에만 사용 — ingest/query가 달라도 무방 |
+
+### 결론
+
+**컴퓨트는 분리하되, 계약은 단일 레지스트리로 묶는다.**
+
+1. **운영 독립은 허용** — ingest 서비스와 query 서비스를 별도 배포·독립 스케일하는 것은
+   권장된다 (읽기/쓰기 부하 특성이 다름).
+2. **레지스트리는 단일 공유 진실 원천** — `ai.pipelines` → `ai.models` → `ai.endpoints`가
+   양쪽이 해석하는 유일한 출처여야 한다. 현재 `ai.ingest`와 `ai.search` 모두 `pipeline`
+   인자를 받아 같은 레지스트리에서 `embed_model`을 해석하므로(`search_impl`이
+   `lookup_endpoint(pipeline_cfg.embed_model)` 사용) 이 불변식이 이미 지켜지고 있다.
+   레지스트리를 절대 fork 하지 않는다.
+3. **백엔드 바인딩은 파이프라인 단위로** — 벡터 스토어/DB 백엔드를 pluggable하게 만들더라도,
+   선택은 **서비스별 env(`VECTOR_BACKEND`)가 아니라 파이프라인 레지스트리 행에 저장**한다.
+   서비스별 env로 두면 ingest는 pgvector에 쓰고 query는 Qdrant를 읽는 drift가 발생한다.
+   양쪽이 같은 pipeline → 같은 store + 같은 model을 해석하게 한다.
+4. **embed_model/dim 변경은 guarded 연산** — 기존 파이프라인의 임베딩 모델/차원을 바꾸는 것은
+   "재인제스트 필요"를 강제하는 명시적 작업으로 만든다. 조용한 config edit으로 허용하지 않는다.
+   (pipeline-worker는 이미 `ai.chunks` 차원과 `EMBED_DIMENSIONS` 불일치 시 fail loudly.)
+
+### B3 추상화 계획에 대한 영향
+
+기존 B3 계획을 폐기하지 않되, 위 원칙으로 재정렬한다:
+
+- **B3.1 (스키마/테이블명 추상화)** — 그대로 유효, 위험 낮음. 먼저 진행.
+- **B3.5 (standalone 마이그레이션)** — 레지스트리 fork 위험이 가장 큰 지점. standalone 모드도
+  레지스트리 테이블을 반드시 부트스트랩하고, **배포당 레지스트리는 정확히 하나**임을 강제.
+- **B3.3 (VectorStore plug-in)** — 가치 최고이자 위험 최고. **백엔드를 파이프라인 단위로
+  바인딩**하도록 재설계(레지스트리 행에 backend + 연결 정보). 이것이 B3.3의 선결 설계 요소.
+- **B3.4 (EventQueue 추상화)** — pgnotify는 outbox와 트랜잭션으로 묶여 있어, Redis/RabbitMQ로
+  바꾸면 "outbox 행 기록 + notify"의 원자성을 잃는다. 기본은 pgnotify 유지, 큐 교체는
+  고throughput 상황에서만. 우선순위 하향.
+- **B3.2 (RDB 드라이버 추상화)** — 레지스트리 + results 큐는 트랜잭션 RDB를 요구. Postgres 외
+  실수요 낮음. 인터페이스만 정의, 우선순위 최하.
+
+권장 순서 갱신: **B3.1 → B3.5 (단일 레지스트리 강제) → B3.3 (파이프라인 단위 백엔드 바인딩) →
+B3.4 → B3.2**.
+
+### 트레이드오프 / 추가 결합
+
+- **시간적 일관성** — ingest 완료 전 query 시 부분/빈 결과. `ai.results` status로 추적 가능
+  (eventual consistency).
+- **삭제/GC** — 컬렉션 삭제 시 chunks와 관련 상태가 함께 제거되어야 함.
+- ADR-002에서 언급한 `pg_aidb.vector_backend` GUC는 이 ADR에 따라 **글로벌 GUC가 아니라
+  파이프라인 단위 설정으로 재해석**된다.

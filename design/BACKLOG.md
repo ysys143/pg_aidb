@@ -90,9 +90,10 @@
   - 보안: 읽기 전용 보장, 권한 제한
 - **미결정**: Query DSL vs MCP Tool 방식 (DECISIONS.md에 기록됨).
 
-### B3. services 독립성 — RDB/VectorDB/Queue 추상화 [NEW 2026-05-19]
+### B3. services 독립성 — RDB/VectorDB/Queue 추상화 [NEW 2026-05-19, 재정렬 2026-06-11 → ADR-007]
 - **목표**: `pipeline-worker` + `rag`가 pg_aidb extension 없이도 standalone으로 동작. PostgreSQL/pgvector/LISTEN 외 다른 백엔드 지원.
 - **동기**: 현재 services는 80% 독립이지만 `ai.*` 스키마 + `vector(1536)` + `NOTIFY aidb_pipeline`이 PostgreSQL/extension에 하드코딩됨. SaaS 형태로 분리 배포하려면 추상화 필요.
+- **제약 (ADR-007)**: ingest/query는 독립 호출 가능하나 공유 불변식(embed_model · dim · metric · collection)으로 결합됨. 어긋나면 silent corruption. 따라서 **컴퓨트는 분리하되 레지스트리는 단일 공유**, 백엔드 선택은 서비스별 env가 아니라 **파이프라인 단위 바인딩**. 권장 순서 갱신: B3.1 → B3.5(단일 레지스트리 강제) → B3.3(파이프라인 단위 백엔드) → B3.4 → B3.2.
 
 - **B3.1 스키마/테이블 이름 추상화** (1-2h) — 가장 작은 단계
   - `AI_SCHEMA=ai`, `RESULTS_TABLE=results`, `OUTBOX_TABLE=_outbox`, `DOCUMENTS_TABLE=documents`, `CHUNKS_TABLE=chunks` env vars
